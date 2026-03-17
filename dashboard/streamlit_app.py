@@ -129,7 +129,6 @@ def format_date_range(first_date: str, last_date: str) -> str:
         return last_date
     return "Non précisée"
 
-
 def render_answer(answer: str) -> None:
     """
     Affiche la réponse du chatbot dans un bloc visuel.
@@ -140,6 +139,7 @@ def render_answer(answer: str) -> None:
         Réponse générée par le système RAG.
     """
     st.markdown("### Recommandation")
+    formatted_answer = answer.replace("\n", "<br>")
 
     st.markdown(
         f"""
@@ -152,12 +152,11 @@ def render_answer(answer: str) -> None:
     color:#111111;
     line-height:1.7;
 ">
-    {answer.replace("\n", "<br>")}
+    {formatted_answer}
 </div>
 """,
         unsafe_allow_html=True,
     )
-
 
 def render_documents(documents: list[dict]) -> None:
     """
@@ -209,7 +208,6 @@ def render_documents(documents: list[dict]) -> None:
         if url:
             st.link_button(f"Voir la fiche de l’événement {i}", url)
 
-
 def render_history_item(item: dict, index: int) -> None:
     """
     Affiche une entrée d'historique.
@@ -221,6 +219,8 @@ def render_history_item(item: dict, index: int) -> None:
     index : int
         Position d'affichage.
     """
+    formatted_history_answer = item["answer"].replace("\n", "<br>")
+
     with st.expander(f"{index}. {item['question']}"):
         st.markdown("**Réponse :**")
         st.markdown(
@@ -234,7 +234,7 @@ def render_history_item(item: dict, index: int) -> None:
     color:#111111;
     line-height:1.6;
 ">
-    {item["answer"].replace("\n", "<br>")}
+    {formatted_history_answer}
 </div>
 """,
             unsafe_allow_html=True,
@@ -250,8 +250,7 @@ def render_history_item(item: dict, index: int) -> None:
                     f"- **{doc.get('title', '')}** "
                     f"({doc.get('city', '')}, {doc.get('first_date', '')})"
                 )
-
-
+                
 def render_metrics(answer: str, n_docs: int) -> None:
     """
     Affiche quelques indicateurs simples.
