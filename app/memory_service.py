@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Service de mémoire locale du système RAG.
 
@@ -18,6 +16,7 @@ La mémoire ne remplace pas le contexte documentaire principal du
 pipeline RAG. Elle agit uniquement comme un mécanisme d'assistance
 conversationnelle pour rendre les échanges plus fluides.
 """
+from __future__ import annotations
 
 import json
 import re

@@ -32,8 +32,12 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 COPY . .
 
-RUN useradd -m appuser && chown -R appuser:appuser /app
-USER appuser
+#création des repertoire de stockage locaux 
+RUN useradd -m appuser \
+    && mkdir -p /app/data/raw /app/data/processed \
+    && chown -R appuser:appuser /app
+
+    USER appuser
 
 EXPOSE 8000 8501 5000
 

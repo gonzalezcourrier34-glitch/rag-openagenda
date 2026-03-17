@@ -1,0 +1,17 @@
+site_name: POC RAG OpenAgenda
+site_author: Stéphane
+
+theme:
+  name: material
+  language: fr
+
+plugins:
+  - search
+  - mkdocstrings:
+      handlers:
+        python:
+          paths: [.]
+
+nav:
+  - Accueil: index.md
+  - API Python: api.md

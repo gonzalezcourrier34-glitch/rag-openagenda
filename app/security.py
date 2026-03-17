@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Gestion de la sécurité de l'API.
 
@@ -14,6 +12,7 @@ La clé API attendue est définie dans la variable d'environnement
 Cette vérification est utilisée dans FastAPI via le système
 de dépendances (`Depends` / `Security`).
 """
+from __future__ import annotations
 
 import secrets
 

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Services de chargement et de préparation des documents OpenAgenda.
 
@@ -15,6 +13,7 @@ Il permet de :
 Les documents produits par ce module servent ensuite à construire
 l'index vectoriel du système RAG.
 """
+from __future__ import annotations
 
 import json
 from datetime import date, timedelta

@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Application principale FastAPI pour l'API RAG OpenAgenda.
 
@@ -12,6 +10,8 @@ Le système repose sur un pipeline Retrieval-Augmented Generation (RAG)
 qui récupère des événements culturels via OpenAgenda, les indexe
 dans FAISS, puis génère une réponse à partir des documents retrouvés.
 """
+
+from __future__ import annotations
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse

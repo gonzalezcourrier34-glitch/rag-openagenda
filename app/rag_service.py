@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """
 Service principal du pipeline RAG.
 
@@ -26,6 +24,7 @@ L'objectif est de conserver le contexte documentaire comme source
 principale d'information, tout en rendant les échanges plus fluides
 dans une logique conversationnelle.
 """
+from __future__ import annotations
 
 from pathlib import Path
 
