@@ -32,6 +32,17 @@ today = date.today()
 date_from = (today - timedelta(days=365)).isoformat()
 date_to = today.isoformat()
 
+# Racine du projet
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+# Répertoire principal des données
+DATA_DIR = BASE_DIR / "data"
+RAW_DIR = DATA_DIR / "raw"
+PROCESSED_DIR = DATA_DIR / "processed"
+
+# Fichiers par défaut
+DEFAULT_JSON_PATH = RAW_DIR / "openagenda_events.json"
+DEFAULT_CSV_PATH = PROCESSED_DIR / "openagenda_events.csv"
 
 def _safe(value: object) -> str:
     """
@@ -53,7 +64,7 @@ def _safe(value: object) -> str:
     """
     return "" if value is None else str(value)
 
-def save_events_to_json(events: list[dict], output_path: str) -> None:
+def save_events_to_json(events: list[dict], output_path: str | Path) -> None:
     """
     Sauvegarde la liste brute des événements au format JSON.
 
@@ -61,7 +72,7 @@ def save_events_to_json(events: list[dict], output_path: str) -> None:
     ----------
     events : list[dict]
         Liste brute des événements récupérés depuis l'API.
-    output_path : str
+    output_path : str | Path
         Chemin du fichier JSON de sortie.
     """
     path = Path(output_path)
@@ -70,7 +81,7 @@ def save_events_to_json(events: list[dict], output_path: str) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(events, f, ensure_ascii=False, indent=2)
 
-def save_events_to_csv(df: pd.DataFrame, output_path: str) -> None:
+def save_events_to_csv(df: pd.DataFrame, output_path: str | Path) -> None:
     """
     Sauvegarde les événements normalisés au format CSV.
 
@@ -78,7 +89,7 @@ def save_events_to_csv(df: pd.DataFrame, output_path: str) -> None:
     ----------
     df : pd.DataFrame
         DataFrame des événements normalisés.
-    output_path : str
+    output_path : str | Path
         Chemin du fichier CSV de sortie.
     """
     path = Path(output_path)
@@ -86,13 +97,13 @@ def save_events_to_csv(df: pd.DataFrame, output_path: str) -> None:
 
     df.to_csv(path, index=False, encoding="utf-8")
 
-def load_events_from_json(input_path: str) -> list[dict]:
+def load_events_from_json(input_path: str | Path) -> list[dict]:
     """
     Charge une liste d'événements depuis un fichier JSON.
 
     Parameters
     ----------
-    input_path : str
+    input_path : str | Path
         Chemin du fichier JSON à lire.
 
     Returns
@@ -103,18 +114,18 @@ def load_events_from_json(input_path: str) -> list[dict]:
     path = Path(input_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"Fichier JSON introuvable : {input_path}")
+        raise FileNotFoundError(f"Fichier JSON introuvable : {path}")
 
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
     
-def load_events_from_csv(input_path: str) -> pd.DataFrame:
+def load_events_from_csv(input_path: str | Path) -> pd.DataFrame:
     """
     Charge les événements normalisés depuis un fichier CSV.
 
     Parameters
     ----------
-    input_path : str
+    input_path : str | Path
         Chemin du fichier CSV à lire.
 
     Returns
@@ -125,7 +136,7 @@ def load_events_from_csv(input_path: str) -> pd.DataFrame:
     path = Path(input_path)
 
     if not path.exists():
-        raise FileNotFoundError(f"Fichier CSV introuvable : {input_path}")
+        raise FileNotFoundError(f"Fichier CSV introuvable : {path}")
 
     return pd.read_csv(path).fillna("")
 
@@ -532,8 +543,8 @@ def load_documents(
     zone: str = "Montpellier",
     scope: str = "city",
     source: str = "api",
-    json_path: str = "data/raw/openagenda_events.json",
-    csv_path: str = "data/processed/openagenda_events.csv"
+    json_path: str | Path = DEFAULT_JSON_PATH,
+    csv_path: str | Path = DEFAULT_CSV_PATH
 ) -> list[Document]:
     """
     Charge et prépare les documents OpenAgenda pour le pipeline RAG.

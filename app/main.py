@@ -24,7 +24,7 @@ from app.schemas import (
     AskResponse,
     HealthResponse,
     RebuildRequest,
-    RebuildResponse,
+    RebuildResponse
 )
 from app.security import require_api_key
 
@@ -62,7 +62,7 @@ def health() -> HealthResponse:
     """
     return HealthResponse(
         status="ok",
-        index_loaded=rag_service.is_index_loaded(),
+        index_loaded=rag_service.is_index_loaded()
     )
 
 
@@ -146,7 +146,7 @@ def rebuild(payload: RebuildRequest) -> RebuildResponse:
         return RebuildResponse(
             status="success",
             message="La base d'information a été reconstruite avec succès.",
-            n_docs_indexed=n_docs,
+            n_docs_indexed=n_docs
         )
 
     except ValueError as exc:

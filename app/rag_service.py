@@ -3,27 +3,28 @@ from __future__ import annotations
 """
 Service principal du pipeline RAG.
 
-Cette classe implémente un pipeline Retrieval-Augmented Generation
-orienté recommandation d'événements culturels.
+Ce module implémente la logique centrale du système de
+Retrieval-Augmented Generation appliqué à la recommandation
+d'événements culturels.
 
-Le service combine trois briques principales :
+Le service repose sur trois briques complémentaires :
 
-- un index vectoriel FAISS pour retrouver les documents les plus proches
-- une mémoire locale pour réutiliser certaines réponses passées
-- un modèle de langage pour générer une réponse finale
+- un index vectoriel FAISS pour retrouver les documents les plus pertinents
+- une mémoire locale pour réutiliser certains échanges passés
+- un modèle de langage pour générer une réponse finale contextualisée
 
-Le fonctionnement général suit cette logique :
+Le déroulement général du pipeline suit les étapes suivantes :
 
-1. vérification d'un éventuel choix utilisateur déjà mémorisé
-2. vérification d'une question déjà posée à l'identique
-3. retrieval documentaire dans l'index vectoriel
-4. construction d'un contexte combinant documents + mémoire
+1. vérification d'un éventuel choix utilisateur basé sur la mémoire
+2. recherche d'une question déjà posée à l'identique
+3. récupération des documents pertinents dans l'index vectoriel
+4. construction d'un contexte combinant mémoire et documents
 5. génération de la réponse finale
-6. sauvegarde de l'échange en mémoire
+6. sauvegarde de l'échange dans la mémoire locale
 
-L'objectif est de rendre le système plus fluide dans une conversation
-tout en conservant le contexte documentaire comme source principale
-de vérité.
+L'objectif est de conserver le contexte documentaire comme source
+principale d'information, tout en rendant les échanges plus fluides
+dans une logique conversationnelle.
 """
 
 from pathlib import Path
@@ -38,30 +39,39 @@ from app.memory_service import MemoryService
 from app.schemas import AskResponse, RetrievedDocument
 
 
+# Racine du projet
+BASE_DIR = Path(__file__).resolve().parents[1]
+
+# Répertoires de données
+DATA_DIR = BASE_DIR / "data"
+INDEX_DIR = DATA_DIR / "index" / "faiss_index_openagenda"
+
+
 class RAGService:
     """
-    Service central du système RAG.
+    Service central du pipeline RAG.
 
-    Cette classe gère l'ensemble du pipeline de question-réponse,
-    depuis le stockage des documents jusqu'à la génération finale.
+    Cette classe orchestre les différentes étapes du système :
+    indexation, recherche documentaire, génération de réponse
+    et gestion d'une mémoire conversationnelle locale.
 
     Elle s'appuie sur :
     - un stockage vectoriel FAISS pour la recherche sémantique
-    - un service de mémoire locale pour réutiliser des échanges passés
+    - un service de mémoire locale pour réutiliser certains échanges
     - un modèle de langage pour produire la réponse finale
 
     Parameters
     ----------
-    documents : list[Document], optional
+    documents : list[Document] | None, default=None
         Liste initiale de documents à indexer.
-    index_dir : str, default="faiss_index_openagenda"
+    index_dir : str | Path, default=INDEX_DIR
         Répertoire contenant l'index vectoriel FAISS.
     embedding_model : str, default="mistral-embed"
-        Modèle utilisé pour générer les embeddings des documents.
+        Modèle utilisé pour générer les embeddings.
     llm_model : str, default="mistral-small-latest"
         Modèle de langage utilisé pour la génération de réponses.
     temperature : float, default=0.2
-        Température du modèle de langage.
+        Température utilisée par le modèle de langage.
     default_k : int, default=3
         Nombre de documents récupérés par défaut lors du retrieval.
     """
@@ -69,7 +79,7 @@ class RAGService:
     def __init__(
         self,
         documents: list[Document] | None = None,
-        index_dir: str = "faiss_index_openagenda",
+        index_dir: str | Path = INDEX_DIR,
         embedding_model: str = "mistral-embed",
         llm_model: str = "mistral-small-latest",
         temperature: float = 0.2,
@@ -79,16 +89,22 @@ class RAGService:
         self.index_dir = Path(index_dir)
         self.default_k = default_k
 
+        # Modèle d'embedding utilisé pour vectoriser les documents.
         self.embeddings = MistralAIEmbeddings(model=embedding_model)
 
+        # Modèle de langage utilisé pour générer la réponse finale.
         self.llm = ChatMistralAI(
             model=llm_model,
             temperature=temperature,
         )
 
+        # Service de mémoire conversationnelle locale.
         self.memory_service = MemoryService()
+
+        # Stockage vectoriel FAISS chargé en mémoire à la demande.
         self.vectorstore: FAISS | None = None
 
+        # Prompt principal transmis au modèle de langage.
         self.prompt = ChatPromptTemplate.from_template(
             """
 Tu es un assistant spécialisé dans la recommandation d'événements culturels.
@@ -131,15 +147,16 @@ Contexte documentaire :
 """
         )
 
+        # Chaîne complète : prompt -> modèle -> sortie texte.
         self.chain = self.prompt | self.llm | StrOutputParser()
 
     def set_documents(self, documents: list[Document]) -> None:
         """
-        Définit la liste de documents à utiliser par le service.
+        Définit la liste de documents utilisée par le service.
 
         Cette méthode permet de remplacer les documents actuellement
-        stockés en mémoire, par exemple après un rechargement ou
-        une reconstruction de l'index.
+        stockés dans le service, par exemple après un rechargement
+        ou une reconstruction de l'index.
 
         Parameters
         ----------
@@ -152,16 +169,16 @@ Contexte documentaire :
         """
         Construit l'index vectoriel FAISS à partir des documents disponibles.
 
-        Si une liste de documents est fournie, elle remplace les documents
-        actuellement stockés dans le service.
+        Si une liste de documents est fournie, elle remplace d'abord
+        les documents actuellement stockés dans le service.
 
-        Cette opération génère les embeddings de tous les documents
-        puis sauvegarde l'index sur disque.
+        Cette opération génère les embeddings puis sauvegarde l'index
+        sur disque dans le répertoire configuré.
 
         Parameters
         ----------
-        documents : list[Document], optional
-            Documents à indexer. Si None, utilise ceux déjà présents.
+        documents : list[Document] | None, default=None
+            Documents à indexer. Si None, utilise les documents déjà chargés.
 
         Returns
         -------
@@ -191,12 +208,12 @@ Contexte documentaire :
         Charge un index FAISS existant depuis le disque.
 
         Cette méthode permet de réutiliser un index déjà construit
-        sans recalculer les embeddings.
+        sans recalculer les embeddings des documents.
 
         Raises
         ------
         FileNotFoundError
-            Si l'index n'existe pas dans le répertoire configuré.
+            Si le répertoire de l'index n'existe pas.
         """
         if not self.index_dir.exists():
             raise FileNotFoundError(
@@ -213,8 +230,8 @@ Contexte documentaire :
         """
         Vérifie que l'index vectoriel est prêt à être utilisé.
 
-        Si l'index n'est pas encore chargé en mémoire,
-        il est automatiquement chargé depuis le disque.
+        Si l'index n'est pas encore chargé en mémoire, il est
+        automatiquement chargé depuis le disque.
         """
         if self.vectorstore is None:
             self.load_index()
@@ -230,13 +247,13 @@ Contexte documentaire :
         ----------
         question : str
             Question posée par l'utilisateur.
-        k : int, optional
+        k : int | None, default=None
             Nombre de documents à récupérer. Si None, utilise `default_k`.
 
         Returns
         -------
         list[Document]
-            Documents les plus proches de la question.
+            Liste des documents les plus proches.
 
         Raises
         ------
@@ -259,11 +276,10 @@ Contexte documentaire :
 
     def format_docs(self, docs: list[Document]) -> str:
         """
-        Formate les documents récupérés en contexte textuel.
+        Formate les documents récupérés en un contexte textuel structuré.
 
-        Chaque document est transformé en bloc structuré contenant
-        les métadonnées principales de l'événement ainsi que
-        son contenu textuel.
+        Chaque document est transformé en bloc lisible contenant
+        ses principales métadonnées ainsi que son contenu textuel.
 
         Parameters
         ----------
@@ -304,18 +320,18 @@ Contenu : {doc.page_content}
         Construit le contexte complet transmis au modèle de langage.
 
         Ce contexte combine :
-        - le contexte documentaire issu des documents retrouvés
-        - un contexte mémoire issu des échanges précédents
+        - le contexte documentaire issu des documents récupérés
+        - un contexte mémoire issu des échanges passés
 
-        Si aucune mémoire pertinente n'est trouvée, un message par défaut
-        est inséré.
+        Si aucun souvenir pertinent n'est disponible, un message
+        par défaut est utilisé.
 
         Parameters
         ----------
         question : str
             Question utilisateur.
         docs : list[Document]
-            Documents récupérés par le retrieval.
+            Documents retrouvés par le moteur de recherche.
 
         Returns
         -------
@@ -339,16 +355,15 @@ Contenu : {doc.page_content}
         """
         Génère une réponse à partir de la question et des documents récupérés.
 
-        La réponse finale s'appuie sur :
-        - les documents retrouvés dans l'index
-        - la mémoire locale, utilisée comme aide complémentaire
+        La réponse finale s'appuie sur les documents retrouvés dans
+        l'index ainsi que, si besoin, sur un rappel mémoire léger.
 
         Parameters
         ----------
         question : str
             Question utilisateur.
         docs : list[Document]
-            Documents retrouvés dans l'index.
+            Documents récupérés dans l'index.
 
         Returns
         -------
@@ -369,6 +384,9 @@ Contenu : {doc.page_content}
         """
         Convertit un document LangChain en objet de réponse API.
 
+        Cette conversion permet de ne conserver que les champs utiles
+        pour la sérialisation et l'affichage côté API ou interface.
+
         Parameters
         ----------
         doc : Document
@@ -377,7 +395,7 @@ Contenu : {doc.page_content}
         Returns
         -------
         RetrievedDocument
-            Représentation sérialisable du document pour l'API.
+            Représentation sérialisable du document.
         """
         metadata = doc.metadata or {}
 
@@ -399,8 +417,8 @@ Contenu : {doc.page_content}
 
         Le traitement suit les étapes suivantes :
         1. vérification d'une éventuelle référence à un choix précédent
-        2. recherche d'une question identique déjà stockée en mémoire
-        3. retrieval documentaire classique dans l'index
+        2. recherche d'une question identique déjà présente en mémoire
+        3. retrieval documentaire dans l'index vectoriel
         4. génération de la réponse
         5. sauvegarde du nouvel échange en mémoire
 
@@ -408,7 +426,7 @@ Contenu : {doc.page_content}
         ----------
         question : str
             Question utilisateur.
-        k : int, optional
+        k : int | None, default=None
             Nombre de documents à récupérer.
 
         Returns
@@ -430,7 +448,7 @@ Contenu : {doc.page_content}
         if not question:
             raise ValueError("La question ne peut pas être vide.")
 
-        # 1. Cas spécial : référence à un choix précédent
+        # Cas 1 : l'utilisateur fait référence à un choix précédent.
         choice_result = self.memory_service.build_choice_answer(question)
         if choice_result is not None:
             choice_docs = [
@@ -453,7 +471,7 @@ Contenu : {doc.page_content}
 
             return response
 
-        # 2. Cas spécial : question exacte déjà présente en mémoire
+        # Cas 2 : la même question existe déjà dans la mémoire.
         exact_memory = self.memory_service.find_exact_question(question)
         if exact_memory:
             memory_docs = [
@@ -471,12 +489,12 @@ Contenu : {doc.page_content}
             self.memory_service.add_entry(
                 question=question,
                 answer=response.answer,
-                documents=[doc.model_dump() for doc in response.documents],
+                documents=[doc.model_dump() for doc in response.documents]
             )
 
             return response
 
-        # 3. Pipeline RAG normal
+        # Cas 3 : exécution normale du pipeline RAG.
         docs = self.retrieve(question=question, k=k)
         answer = self.generate(question=question, docs=docs)
 
@@ -492,7 +510,7 @@ Contenu : {doc.page_content}
             documents=retrieved_docs
         )
 
-        # 4. Sauvegarde mémoire
+        # Sauvegarde de la nouvelle interaction dans la mémoire locale.
         self.memory_service.add_entry(
             question=question,
             answer=answer,
@@ -508,6 +526,6 @@ Contenu : {doc.page_content}
         Returns
         -------
         bool
-            True si l'index FAISS est disponible, sinon False.
+            `True` si l'index FAISS est disponible, sinon `False`.
         """
         return self.vectorstore is not None

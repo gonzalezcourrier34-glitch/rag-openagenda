@@ -13,6 +13,7 @@
   <img src="https://img.shields.io/badge/PostgreSQL-Database-blue" alt="PostgreSQL">
   <img src="https://img.shields.io/badge/MLflow-Tracking-lightgrey" alt="MLflow">
   <img src="https://img.shields.io/badge/Docker-Containerized-2496ED" alt="Docker">
+  <img src="https://img.shields.io/badge/GitHub_Actions-CI%2FCD-2088FF" alt="CI/CD">
 </p>
 
 <hr>
@@ -38,6 +39,7 @@ Ce projet m’a permis de travailler sur un pipeline complet combinant :
   <li>génération de réponses avec un LLM</li>
   <li>exposition du système via une API et une interface utilisateur</li>
   <li>containerisation et orchestration des services</li>
+  <li>mise en place d’une démarche CI/CD pour fiabiliser le projet</li>
 </ul>
 
 <hr>
@@ -75,6 +77,7 @@ Avec ce prototype, j’ai cherché à démontrer la faisabilité technique d’u
   <li>une recherche vectorielle</li>
   <li>un modèle de langage intégré dans une application complète</li>
   <li>une architecture modulaire exposée via API et dashboard</li>
+  <li>une base technique suffisamment structurée pour évoluer vers un déploiement reproductible</li>
 </ul>
 
 <p>
@@ -138,10 +141,8 @@ api (FastAPI)
         ├── FAISS
         ├── mémoire locale
         ├── OpenAgenda
-        └── MLflow
-                │
-                ▼
-           PostgreSQL
+        ├── MLflow
+        └── PostgreSQL
 </code></pre>
 
 <p>
@@ -155,6 +156,7 @@ Ce découpage m’a permis de séparer clairement :
   <li>l’exposition via API</li>
   <li>l’interface utilisateur</li>
   <li>le suivi expérimental et la persistance technique</li>
+  <li>l’exécution locale et conteneurisée</li>
 </ul>
 
 <hr>
@@ -170,7 +172,7 @@ Les données proviennent de l’API <strong>OpenAgenda</strong>. J’ai récupé
 <h3>Persistance des données</h3>
 
 <p>
-Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> pour conserver un jeu de données stable, même en cas d’évolution de l’API source.
+Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> dans le répertoire <code>data/</code> pour conserver un jeu de données stable, même en cas d’évolution de l’API source.
 </p>
 
 <p>
@@ -181,6 +183,7 @@ Cette étape me permet :
   <li>de rejouer le pipeline sans dépendre systématiquement de l’API</li>
   <li>de conserver une trace des données collectées</li>
   <li>de faciliter la reconstruction de l’index vectoriel</li>
+  <li>de mieux structurer le projet entre données brutes et données préparées</li>
 </ul>
 
 <h3>Préparation des données</h3>
@@ -263,6 +266,7 @@ Cette persistance me permet :
 <ul>
   <li>d’éviter de recalculer les embeddings à chaque redémarrage</li>
   <li>de reconstruire l’index uniquement lorsque cela est nécessaire</li>
+  <li>de séparer plus proprement les données, l’index et les services applicatifs</li>
 </ul>
 
 <p>
@@ -325,7 +329,43 @@ Cet endpoint joue un rôle central lors du premier démarrage, car l’API doit 
 
 <hr>
 
-<h2>7. Évaluation du système</h2>
+<h2>7. Qualité logicielle, tests et CI/CD</h2>
+
+<h3>Tests</h3>
+
+<p>
+Afin de fiabiliser le projet, j’ai mis en place une base de tests automatisés sur les composants essentiels du système, notamment l’API, certains services applicatifs et les comportements attendus sur les endpoints principaux.
+</p>
+
+<p>
+Cette démarche permet de vérifier plus facilement :
+</p>
+
+<ul>
+  <li>le bon fonctionnement des endpoints critiques</li>
+  <li>la stabilité du comportement attendu lors des évolutions du code</li>
+  <li>la non-régression sur les fonctionnalités principales du prototype</li>
+</ul>
+
+<h3>CI</h3>
+
+<p>
+Le dépôt GitHub intègre une chaîne d’intégration continue avec <strong>GitHub Actions</strong>. À chaque mise à jour du code, le pipeline peut exécuter automatiquement les étapes de contrôle qualité, comme l’installation de l’environnement, l’exécution des tests et la vérification du bon état global du projet.
+</p>
+
+<h3>CD</h3>
+
+<p>
+Dans une logique de déploiement continu, l’architecture du projet a également été pensée pour pouvoir s’intégrer à une chaîne de livraison plus reproductible, notamment grâce à Docker, à la structuration du dépôt et à la séparation claire entre services.
+</p>
+
+<p>
+Cette partie permet de rapprocher le prototype d’un fonctionnement plus industriel, même dans le cadre d’un POC.
+</p>
+
+<hr>
+
+<h2>8. Évaluation du système</h2>
 
 <p>
 Pour évaluer le prototype, j’ai constitué un petit ensemble de questions couvrant différents besoins :
@@ -350,7 +390,7 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 
 <hr>
 
-<h2>8. Recommandations et perspectives</h2>
+<h2>9. Recommandations et perspectives</h2>
 
 <h3>Ce qui fonctionne bien</h3>
 
@@ -380,11 +420,12 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
   <li>mémoire conversationnelle plus avancée</li>
   <li>déploiement dans une architecture cloud</li>
   <li>ajout d’un monitoring plus complet des usages</li>
+  <li>renforcement du pipeline CI/CD avec davantage de contrôles automatisés</li>
 </ul>
 
 <hr>
 
-<h2>9. Organisation du dépôt GitHub</h2>
+<h2>10. Organisation du dépôt GitHub</h2>
 
 <pre><code>project/
 │
@@ -402,23 +443,44 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 │
 ├── data/
 │   ├── raw/
-│   └── processed/
+│   ├── processed/
+│   └── index/
+│
+├── tests/
+│
+├── .github/
+│   └── workflows/
+│       ├── ci.yml
+│       └── cd.yml
 │
 ├── Dockerfile
 ├── docker-compose.yml
 ├── .dockerignore
 ├── .env.example
 ├── pyproject.toml
-└── README.md
+├── README.md
+└── mkdocs.yml
 </code></pre>
 
 <p>
 Chaque module correspond à une brique du système, ce qui rend le projet plus lisible, plus modulaire et plus facile à faire évoluer.
 </p>
 
+<p>
+L’organisation du dépôt permet aussi de distinguer plus clairement :
+</p>
+
+<ul>
+  <li>le code applicatif</li>
+  <li>les données</li>
+  <li>les tests</li>
+  <li>les workflows d’automatisation</li>
+  <li>la documentation</li>
+</ul>
+
 <hr>
 
-<h2>10. Interface utilisateur</h2>
+<h2>11. Interface utilisateur</h2>
 
 <p>
 J’ai également développé une interface <strong>Streamlit</strong> pour faciliter l’utilisation du système. Elle permet de :
@@ -434,7 +496,7 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
 
 <hr>
 
-<h2>11. Suivi expérimental et infrastructure</h2>
+<h2>12. Suivi expérimental et infrastructure</h2>
 
 <h3>MLflow</h3>
 
@@ -453,6 +515,17 @@ J’ai ajouté <strong>PostgreSQL</strong> comme base de données afin de prépa
 <p>
 L’ensemble de l’application est désormais containerisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer l’ensemble de la stack avec une seule commande et d’obtenir un environnement reproductible.
 </p>
+
+<p>
+La conteneurisation facilite également :
+</p>
+
+<ul>
+  <li>la séparation des services</li>
+  <li>la reproductibilité de l’environnement</li>
+  <li>la portabilité du projet</li>
+  <li>l’intégration future dans une chaîne CI/CD complète</li>
+</ul>
 
 <hr>
 
