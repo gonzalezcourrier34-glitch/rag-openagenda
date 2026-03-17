@@ -8,6 +8,7 @@ on:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  PYTHONPATH: .
 
 jobs:
   test:
@@ -31,10 +32,7 @@ jobs:
         run: uv sync --frozen
 
       - name: Vérifier la compilation
-        run: |
-          python -m compileall app
-          python -m compileall dashboard
-          python -m compileall tests
+        run: python -m compileall app dashboard tests
 
       - name: Lancer les tests
         run: uv run pytest -v --maxfail=1 --disable-warnings
