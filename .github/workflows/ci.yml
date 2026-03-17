@@ -6,27 +6,35 @@ on:
   pull_request:
     branches: [main, develop]
 
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout du code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Installer Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
 
-      - name: Installer uv
-        uses: astral-sh/setup-uv@v5
+      - name: Installer uv (avec cache)
+        uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
 
       - name: Installer les dépendances
-        run: uv sync
+        run: uv sync --frozen
 
       - name: Vérifier la compilation
-        run: uv run python -m compileall app dashboard
+        run: python -m compileall app dashboard tests
 
       - name: Lancer les tests
-        run: uv run pytest
+        run: uv run pytest -v --maxfail=1 --disable-warnings
+
+      - name: Vérifier le build Docker
+        run: docker build -t pocrag-test .
