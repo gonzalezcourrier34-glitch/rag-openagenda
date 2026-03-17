@@ -23,6 +23,8 @@ data/
 livrables/
 mlruns/
 artifacts/
+faiss_index_openagenda/
+rag_memory.json
 
 *.db
 *.sqlite
