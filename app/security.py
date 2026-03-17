@@ -22,13 +22,6 @@ from fastapi.security import APIKeyHeader
 
 from app.config import API_KEY
 
-
-if not API_KEY:
-    raise RuntimeError(
-        "La variable d'environnement API_KEY est absente."
-    )
-
-
 api_key_header = APIKeyHeader(
     name="x-api-key",
     scheme_name="API Key",
@@ -64,6 +57,13 @@ def require_api_key(api_key: str | None = Security(api_key_header)) -> str:
     HTTPException
         401 Unauthorized si la clé API est absente ou invalide.
     """
+    
+    if not API_KEY:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="La clé API du serveur n'est pas configurée.",
+        )
+    
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
