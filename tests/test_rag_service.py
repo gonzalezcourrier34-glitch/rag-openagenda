@@ -212,7 +212,11 @@ def test_generate_uses_chain(patched_rag, sample_documents):
     rag = RAGService()
     rag.chain = FakeChain("Réponse générée")
 
-    result = rag.generate("question test", sample_documents)
+    result = rag.generate(
+        "question test",
+        sample_documents,
+        current_date="2026-03-18",
+    )
 
     assert result == "Réponse générée"
 
