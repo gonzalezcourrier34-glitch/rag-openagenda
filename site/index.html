@@ -6,13 +6,13 @@
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
       
-        <meta name="description" content="Documentation du projet de recommandation d'événements culturels">
-      
       
         <meta name="author" content="Stéphane">
       
       
       
+      
+        <link rel="next" href="api/">
       
       
         
@@ -46,6 +46,8 @@
       
     
     
+      <link rel="stylesheet" href="assets/_mkdocstrings.css">
+    
     <script>__md_scope=new URL(".",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
@@ -64,7 +66,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#proof-of-concept-base-sur-une-architecture-rag" class="md-skip">
+        <a href="#assistant-rag-openagenda" class="md-skip">
           Aller au contenu
         </a>
       
@@ -256,10 +258,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#objectif-du-projet" class="md-nav__link">
+  <a href="#objectif" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Objectif du projet
+        Objectif
       
     </span>
   </a>
@@ -278,10 +280,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#fonctionnalites" class="md-nav__link">
+  <a href="#fonctionnement" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Fonctionnalités
+        Fonctionnement
       
     </span>
   </a>
@@ -292,6 +294,33 @@
   
 </nav>
       
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="api/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    API Python
+  
+
+    
+  </span>
+  
+  
+
+      </a>
     </li>
   
 
@@ -323,10 +352,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#objectif-du-projet" class="md-nav__link">
+  <a href="#objectif" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Objectif du projet
+        Objectif
       
     </span>
   </a>
@@ -345,10 +374,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#fonctionnalites" class="md-nav__link">
+  <a href="#fonctionnement" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Fonctionnalités
+        Fonctionnement
       
     </span>
   </a>
@@ -372,32 +401,30 @@
 
 
 
-<h1 id="proof-of-concept-base-sur-une-architecture-rag">Proof of Concept basé sur une architecture RAG</h1>
-<h2 id="objectif-du-projet">Objectif du projet</h2>
-<p>Je développe un assistant intelligent de recommandation d’événements culturels basé sur une architecture RAG.</p>
-<p>L’objectif est de combiner :
-- une API OpenAgenda pour collecter les événements,
-- un pipeline de traitement des données,
-- un moteur de recherche vectorielle,
-- un modèle de langage pour générer des réponses contextualisées,
-- une interface Streamlit pour interagir avec le système.</p>
+<h1 id="assistant-rag-openagenda">Assistant RAG OpenAgenda</h1>
+<h2 id="objectif">Objectif</h2>
+<p>Je développe un assistant intelligent permettant de recommander des événements culturels.</p>
+<p>Le système repose sur une architecture RAG combinant :
+- récupération de documents
+- index vectoriel FAISS
+- modèle de langage
+- API FastAPI
+- interface Streamlit</p>
 <h2 id="architecture">Architecture</h2>
-<p>Le projet est structuré autour de plusieurs services :</p>
 <ul>
-<li><strong>API FastAPI</strong> : exposition des endpoints du projet</li>
-<li><strong>Dashboard Streamlit</strong> : interface utilisateur</li>
-<li><strong>MLflow</strong> : suivi des expérimentations</li>
-<li><strong>PostgreSQL</strong> : stockage des données et des métadonnées</li>
+<li>API FastAPI</li>
+<li>Dashboard Streamlit</li>
+<li>MLflow</li>
+<li>PostgreSQL</li>
 </ul>
-<h2 id="fonctionnalites">Fonctionnalités</h2>
-<ul>
-<li>ingestion d’événements culturels</li>
-<li>nettoyage et structuration des données</li>
+<h2 id="fonctionnement">Fonctionnement</h2>
+<ol>
+<li>récupération des événements</li>
+<li>transformation des données</li>
 <li>indexation vectorielle</li>
-<li>recherche de contexte pertinent</li>
-<li>génération de réponse avec un LLM</li>
-<li>consultation via interface web</li>
-</ul>
+<li>recherche de contexte</li>
+<li>génération de réponse</li>
+</ol>
 
 
 

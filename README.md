@@ -25,21 +25,22 @@ Dans ce projet, j’ai conçu un assistant intelligent capable de recommander de
 </p>
 
 <p>
-L’idée principale est de m’appuyer sur une architecture <strong>RAG (Retrieval-Augmented Generation)</strong> pour interroger des données réelles issues de l’API <strong>OpenAgenda</strong>, retrouver les événements les plus pertinents, puis générer une réponse claire avec un modèle de langage.
+L’objectif est de m’appuyer sur une architecture <strong>RAG (Retrieval-Augmented Generation)</strong> afin d’interroger des données réelles issues de l’API <strong>OpenAgenda</strong>, retrouver les événements les plus pertinents, puis générer une réponse claire, contextualisée et exploitable.
 </p>
 
 <p>
-Ce projet m’a permis de travailler sur un pipeline complet combinant :
+Ce projet m’a permis de travailler sur une chaîne complète de traitement, depuis la collecte des données jusqu’à leur exposition dans une application conteneurisée.
 </p>
 
 <ul>
-  <li>collecte de données via API</li>
-  <li>préparation et transformation de données textuelles</li>
+  <li>collecte des données via API</li>
+  <li>préparation et structuration de données textuelles</li>
   <li>vectorisation et recherche sémantique</li>
-  <li>génération de réponses avec un LLM</li>
-  <li>exposition du système via une API et une interface utilisateur</li>
-  <li>containerisation et orchestration des services</li>
-  <li>mise en place d’une démarche CI/CD pour fiabiliser le projet</li>
+  <li>génération de réponse avec un LLM</li>
+  <li>exposition du système via API FastAPI</li>
+  <li>développement d’une interface utilisateur Streamlit</li>
+  <li>containerisation avec Docker</li>
+  <li>mise en place d’une logique CI/CD avec GitHub Actions</li>
 </ul>
 
 <hr>
@@ -53,17 +54,17 @@ Dans le cadre de ce Proof of Concept, l’entreprise fictive <strong>Puls-Events
 </p>
 
 <p>
-Les moteurs de recherche classiques montrent rapidement leurs limites lorsque la demande est formulée librement, avec des besoins parfois flous ou implicites. Par exemple, un utilisateur peut chercher une exposition, une activité pour enfants ou une visite autour du patrimoine sans savoir exactement quels filtres utiliser.
+Les moteurs de recherche classiques montrent rapidement leurs limites lorsque la demande est formulée librement, avec des besoins parfois flous, implicites ou insuffisamment structurés.
 </p>
 
 <h3>Problématique</h3>
 
 <p>
-La difficulté est donc de concevoir un système capable de comprendre une question exprimée naturellement, de retrouver les événements les plus pertinents, puis de formuler une réponse utile sans inventer d’informations.
+La difficulté consiste donc à concevoir un système capable de comprendre une question exprimée naturellement, de retrouver les événements les plus pertinents, puis de formuler une réponse utile sans inventer d’informations.
 </p>
 
 <p>
-C’est précisément ce que permet une architecture RAG, en combinant une phase de recherche documentaire avec une phase de génération.
+C’est précisément l’intérêt d’une architecture RAG, qui combine une phase de recherche documentaire et une phase de génération.
 </p>
 
 <h3>Objectif du POC</h3>
@@ -73,11 +74,11 @@ Avec ce prototype, j’ai cherché à démontrer la faisabilité technique d’u
 </p>
 
 <ul>
-  <li>des données réelles</li>
-  <li>une recherche vectorielle</li>
-  <li>un modèle de langage intégré dans une application complète</li>
+  <li>des données réelles issues d’une API externe</li>
+  <li>une recherche vectorielle sur des documents indexés</li>
+  <li>un modèle de langage capable de générer une réponse contextualisée</li>
   <li>une architecture modulaire exposée via API et dashboard</li>
-  <li>une base technique suffisamment structurée pour évoluer vers un déploiement reproductible</li>
+  <li>une base technique structurée pour évoluer vers un déploiement reproductible</li>
 </ul>
 
 <p>
@@ -89,16 +90,16 @@ L’objectif est qu’un utilisateur puisse poser une question comme :
 </blockquote>
 
 <p>
-et obtenir une réponse générée à partir des événements réellement disponibles.
+et obtenir une réponse générée à partir d’événements réellement disponibles dans les données chargées.
 </p>
 
 <h3>Périmètre</h3>
 
 <ul>
   <li><strong>Source de données :</strong> API OpenAgenda</li>
-  <li><strong>Zone géographique :</strong> Montpellier par défaut, avec possibilité de configuration</li>
+  <li><strong>Zone géographique :</strong> Montpellier par défaut, configurable</li>
   <li><strong>Domaine :</strong> événements culturels</li>
-  <li><strong>Période :</strong> événements définis selon la fenêtre temporelle configurée dans le projet</li>
+  <li><strong>Période :</strong> événements récupérés selon la fenêtre temporelle définie dans le projet</li>
 </ul>
 
 <hr>
@@ -106,7 +107,7 @@ et obtenir une réponse générée à partir des événements réellement dispon
 <h2>2. Architecture du système</h2>
 
 <p>
-L’architecture mise en place repose sur une chaîne de traitement modulaire, dans laquelle chaque composant remplit un rôle précis.
+L’architecture repose sur une chaîne de traitement modulaire, dans laquelle chaque composant remplit un rôle précis.
 </p>
 
 <pre><code>Utilisateur
@@ -155,7 +156,8 @@ Ce découpage m’a permis de séparer clairement :
   <li>la mémoire conversationnelle</li>
   <li>l’exposition via API</li>
   <li>l’interface utilisateur</li>
-  <li>le suivi expérimental et la persistance technique</li>
+  <li>le suivi expérimental</li>
+  <li>la persistance technique</li>
   <li>l’exécution locale et conteneurisée</li>
 </ul>
 
@@ -166,13 +168,13 @@ Ce découpage m’a permis de séparer clairement :
 <h3>Source de données</h3>
 
 <p>
-Les données proviennent de l’API <strong>OpenAgenda</strong>. J’ai récupéré les événements à l’aide de requêtes paginées en filtrant selon une zone géographique et un périmètre défini.
+Les données proviennent de l’API <strong>OpenAgenda</strong>. Les événements sont récupérés à l’aide de requêtes paginées, en filtrant selon une zone géographique et un périmètre définis dans la configuration.
 </p>
 
 <h3>Persistance des données</h3>
 
 <p>
-Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> dans le répertoire <code>data/</code> pour conserver un jeu de données stable, même en cas d’évolution de l’API source.
+Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> dans le répertoire <code>data/</code>.
 </p>
 
 <p>
@@ -183,7 +185,7 @@ Cette étape me permet :
   <li>de rejouer le pipeline sans dépendre systématiquement de l’API</li>
   <li>de conserver une trace des données collectées</li>
   <li>de faciliter la reconstruction de l’index vectoriel</li>
-  <li>de mieux structurer le projet entre données brutes et données préparées</li>
+  <li>de structurer plus proprement le projet entre données brutes et données préparées</li>
 </ul>
 
 <h3>Préparation des données</h3>
@@ -195,7 +197,7 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
 <ul>
   <li>d’uniformiser les noms de colonnes</li>
   <li>de gérer les valeurs manquantes</li>
-  <li>de nettoyer certains champs textuels</li>
+  <li>de nettoyer les champs textuels</li>
   <li>de préparer les métadonnées utiles pour l’affichage et la recherche</li>
 </ul>
 
@@ -222,7 +224,7 @@ Le texte utilisé pour la vectorisation est construit à partir des informations
 <h3>Embeddings</h3>
 
 <p>
-Pour la vectorisation, j’ai utilisé le modèle <strong>Mistral Embedding API</strong>. Chaque document est transformé en vecteur puis ajouté dans un index FAISS afin de permettre une recherche sémantique rapide.
+Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral</strong>. Chaque document est transformé en vecteur puis ajouté dans un index <strong>FAISS</strong> afin de permettre une recherche sémantique rapide.
 </p>
 
 <hr>
@@ -240,15 +242,15 @@ Ce choix m’a semblé pertinent pour plusieurs raisons :
 <ul>
   <li>bonne qualité de génération</li>
   <li>coût raisonnable pour un prototype</li>
-  <li>compatibilité simple avec LangChain</li>
+  <li>intégration simple avec LangChain</li>
 </ul>
 
 <p>
-Le prompt utilisé impose une contrainte importante : le modèle doit répondre uniquement à partir du contexte documentaire et ne pas inventer d’événements.
+Le prompt utilisé impose une contrainte importante : le modèle doit répondre uniquement à partir du contexte documentaire retrouvé et ne pas inventer d’événements.
 </p>
 
 <p>
-La principale limite reste la dépendance à la qualité des documents retrouvés. Si le retrieval manque de pertinence, la génération finale en hérite directement.
+La principale limite reste la dépendance à la qualité des documents récupérés. Si le retrieval manque de pertinence, la génération finale en hérite directement.
 </p>
 
 <hr>
@@ -293,7 +295,9 @@ J’ai développé l’API avec <strong>FastAPI</strong> afin d’exposer le sys
 
 <h3><code>/health</code></h3>
 
-<p>Permet de vérifier l’état du service et de savoir si l’index vectoriel est chargé.</p>
+<p>
+Permet de vérifier l’état du service et de savoir si l’index vectoriel est chargé.
+</p>
 
 <pre><code>{
   "status": "ok",
@@ -302,7 +306,9 @@ J’ai développé l’API avec <strong>FastAPI</strong> afin d’exposer le sys
 
 <h3><code>/ask</code></h3>
 
-<p>Permet de poser une question au système.</p>
+<p>
+Permet de poser une question au système RAG.
+</p>
 
 <pre><code>{
   "question": "Je cherche une exposition à Montpellier"
@@ -374,7 +380,7 @@ Pour évaluer le prototype, j’ai constitué un petit ensemble de questions cou
 <ul>
   <li>recherche d’expositions</li>
   <li>activités familiales</li>
-  <li>visites ou patrimoine</li>
+  <li>visites patrimoniales</li>
   <li>demandes culturelles plus générales</li>
 </ul>
 
@@ -396,7 +402,7 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 
 <ul>
   <li>le système comprend des questions formulées naturellement</li>
-  <li>la recherche sémantique permet de retrouver des événements cohérents</li>
+  <li>la recherche sémantique retrouve des événements cohérents</li>
   <li>la réponse générée reste lisible et exploitable</li>
   <li>la mémoire locale améliore certains échanges de suivi</li>
   <li>l’architecture modulaire facilite les évolutions futures</li>
@@ -418,9 +424,9 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
   <li>amélioration du filtrage par métadonnées</li>
   <li>mise en place d’une recherche hybride vectorielle et lexicale</li>
   <li>mémoire conversationnelle plus avancée</li>
-  <li>déploiement dans une architecture cloud</li>
-  <li>ajout d’un monitoring plus complet des usages</li>
-  <li>renforcement du pipeline CI/CD avec davantage de contrôles automatisés</li>
+  <li>déploiement cloud</li>
+  <li>monitoring plus complet</li>
+  <li>renforcement du pipeline CI/CD</li>
 </ul>
 
 <hr>
@@ -446,6 +452,8 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 │   ├── processed/
 │   └── index/
 │
+├── docs/
+│
 ├── tests/
 │
 ├── .github/
@@ -465,18 +473,6 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 <p>
 Chaque module correspond à une brique du système, ce qui rend le projet plus lisible, plus modulaire et plus facile à faire évoluer.
 </p>
-
-<p>
-L’organisation du dépôt permet aussi de distinguer plus clairement :
-</p>
-
-<ul>
-  <li>le code applicatif</li>
-  <li>les données</li>
-  <li>les tests</li>
-  <li>les workflows d’automatisation</li>
-  <li>la documentation</li>
-</ul>
 
 <hr>
 
@@ -501,7 +497,7 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
 <h3>MLflow</h3>
 
 <p>
-J’ai intégré <strong>MLflow</strong> afin de disposer d’un espace dédié au suivi expérimental et à la centralisation de certains essais ou traitements liés au projet.
+J’ai intégré <strong>MLflow</strong> afin de disposer d’un espace dédié au suivi expérimental et à la centralisation de certains essais liés au projet.
 </p>
 
 <h3>PostgreSQL</h3>
@@ -513,18 +509,14 @@ J’ai ajouté <strong>PostgreSQL</strong> comme base de données afin de prépa
 <h3>Docker</h3>
 
 <p>
-L’ensemble de l’application est désormais containerisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer l’ensemble de la stack avec une seule commande et d’obtenir un environnement reproductible.
-</p>
-
-<p>
-La conteneurisation facilite également :
+L’ensemble de l’application est containerisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer la stack avec une seule commande et d’obtenir un environnement reproductible.
 </p>
 
 <ul>
-  <li>la séparation des services</li>
-  <li>la reproductibilité de l’environnement</li>
-  <li>la portabilité du projet</li>
-  <li>l’intégration future dans une chaîne CI/CD complète</li>
+  <li>séparation des services</li>
+  <li>reproductibilité de l’environnement</li>
+  <li>portabilité du projet</li>
+  <li>intégration future dans une chaîne CI/CD complète</li>
 </ul>
 
 <hr>
@@ -535,7 +527,7 @@ La conteneurisation facilite également :
   <li>Docker</li>
   <li>Docker Compose</li>
   <li>Git</li>
-  <li>Une clé API OpenAgenda</li>
+  <li>une clé API OpenAgenda</li>
 </ul>
 
 <hr>
@@ -583,9 +575,7 @@ TYPE_ZONE=city</code></pre>
 
 <pre><code>docker compose up --build</code></pre>
 
-<p>
-Pour lancer les services en arrière-plan :
-</p>
+<p>Pour lancer les services en arrière-plan :</p>
 
 <pre><code>docker compose up --build -d</code></pre>
 
@@ -639,9 +629,7 @@ Une fois l’index reconstruit, il est possible de poser une question depuis le 
 
 <pre><code>docker compose down</code></pre>
 
-<p>
-Pour supprimer également les volumes :
-</p>
+<p>Pour supprimer également les volumes :</p>
 
 <pre><code>docker compose down -v</code></pre>
 
