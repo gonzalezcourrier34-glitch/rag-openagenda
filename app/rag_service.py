@@ -37,6 +37,7 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from app.memory_service import MemoryService
 from app.schemas import AskResponse, RetrievedDocument
 
+from datetime import datetime
 
 # Racine du projet
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -108,6 +109,8 @@ class RAGService:
             """
 Tu es un assistant spécialisé dans la recommandation d'événements culturels.
 
+Date actuelle : {current_date}
+
 Tu dois répondre uniquement à partir du CONTEXTE DOCUMENTAIRE fourni.
 
 Tu peux utiliser la MÉMOIRE seulement comme aide complémentaire si elle est pertinente,
@@ -116,9 +119,11 @@ mais tu ne dois jamais inventer d'événement qui ne serait pas présent dans le
 Règles :
 - N'invente aucun événement
 - Utilise uniquement les événements présents dans le contexte
+- Respecte strictement les contraintes de la question (date, gratuité, type, etc.)
+- Si une information demandée n'est pas explicitement présente dans le contexte, ne pas l'inventer
 - Si plusieurs événements sont pertinents, présente-les séparément.
-- Si aucune information n’est disponible, réponds exactement : "Je ne trouve pas d'événement correspondant, je suis un assistant qui ne peut vous conseiller que des événements culturels."
-et ne propose rien.
+- Si aucune information n’est disponible, réponds exactement :
+"Je ne trouve pas d'événement correspondant, je suis un assistant qui ne peut vous conseiller que des événements culturels."
 
 Format de réponse OBLIGATOIRE :
 
@@ -144,11 +149,26 @@ Mémoire :
 Contexte documentaire :
 {context}
 """
-        )
+)
 
         # Chaîne complète : prompt -> modèle -> sortie texte.
         self.chain = self.prompt | self.llm | StrOutputParser()
 
+    def _get_current_date(self) -> str:
+        """
+        Retourne la date actuelle au format YYYY-MM-DD.
+
+        Cette date est injectée dans le prompt afin de permettre
+        l'interprétation correcte des expressions temporelles
+        relatives comme "aujourd'hui", "demain" ou "ce week-end".
+
+        Returns
+        -------
+        str
+            Date actuelle au format YYYY-MM-DD.
+        """
+        return datetime.today().strftime("%Y-%m-%d")
+    
     def set_documents(self, documents: list[Document]) -> None:
         """
         Définit la liste de documents utilisée par le service.
@@ -231,9 +251,18 @@ Contexte documentaire :
 
         Si l'index n'est pas encore chargé en mémoire, il est
         automatiquement chargé depuis le disque.
+
+        ou reconstruit
         """
         if self.vectorstore is None:
-            self.load_index()
+            if self.index_dir.exists():
+                self.load_index()
+            elif self.documents:
+                self.build_index()
+            else:
+                raise FileNotFoundError(
+                    f"Index introuvable dans '{self.index_dir}' et aucun document disponible pour le reconstruire."
+                )
 
     def retrieve(self, question: str, k: int | None = None) -> list[Document]:
         """
@@ -350,7 +379,12 @@ Contenu : {doc.page_content}
             "memory_context": memory_context
         }
 
-    def generate(self, question: str, docs: list[Document]) -> str:
+    def generate(
+        self,
+        question: str,
+        docs: list[Document],
+        current_date: str
+    ) -> str:
         """
         Génère une réponse à partir de la question et des documents récupérés.
 
@@ -363,6 +397,9 @@ Contenu : {doc.page_content}
             Question utilisateur.
         docs : list[Document]
             Documents récupérés dans l'index.
+        current_date : str
+            Date actuelle au format YYYY-MM-DD, utilisée pour interpréter
+            les contraintes temporelles relatives dans la question.
 
         Returns
         -------
@@ -375,7 +412,8 @@ Contenu : {doc.page_content}
             {
                 "question": question.strip(),
                 "context": full_context["context"],
-                "memory_context": full_context["memory_context"]
+                "memory_context": full_context["memory_context"],
+                "current_date": current_date,
             }
         )
 
@@ -447,6 +485,8 @@ Contenu : {doc.page_content}
         if not question:
             raise ValueError("La question ne peut pas être vide.")
 
+        current_date = self._get_current_date()
+
         # Cas 1 : l'utilisateur fait référence à un choix précédent.
         choice_result = self.memory_service.build_choice_answer(question)
         if choice_result is not None:
@@ -495,7 +535,11 @@ Contenu : {doc.page_content}
 
         # Cas 3 : exécution normale du pipeline RAG.
         docs = self.retrieve(question=question, k=k)
-        answer = self.generate(question=question, docs=docs)
+        answer = self.generate(
+            question=question,
+            docs=docs,
+            current_date=current_date,
+        )
 
         retrieved_docs = [
             self.to_retrieved_document(doc)

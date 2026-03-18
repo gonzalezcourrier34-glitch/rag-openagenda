@@ -2,8 +2,10 @@
 Service de mémoire locale du système RAG.
 
 Ce module implémente une mémoire conversationnelle simple persistée
-dans un fichier JSON. Son rôle est de conserver une trace légère de
-certains échanges précédents entre l'utilisateur et le système.
+dans un fichier JSON situé dans le dossier `data/memory/`.
+
+Son rôle est de conserver une trace légère de certains échanges
+entre l'utilisateur et le système.
 
 Cette mémoire permet notamment de :
 
@@ -33,9 +35,12 @@ class MemoryService:
     recherche d'une question identique et interprétation de choix
     utilisateur à partir des documents précédemment proposés.
 
+    La mémoire est stockée dans le fichier :
+    `data/memory/rag_memory.json`.
+
     Parameters
     ----------
-    memory_file : str, default="rag_memory.json"
+    memory_file : str, default="data/memory/rag_memory.json"
         Chemin du fichier JSON utilisé pour persister la mémoire.
     max_entries : int, default=500
         Nombre maximum d'entrées conservées en mémoire.
@@ -43,7 +48,7 @@ class MemoryService:
 
     def __init__(
         self,
-        memory_file: str = "rag_memory.json",
+        memory_file: str = "data/memory/rag_memory.json",
         max_entries: int = 500,
     ) -> None:
         self.memory_file = Path(memory_file)
@@ -76,8 +81,8 @@ class MemoryService:
         """
         Charge les entrées mémoire depuis le fichier JSON.
 
-        Si le fichier n'existe pas ou si son contenu n'est pas
-        exploitable, la fonction retourne une liste vide.
+        Si le fichier n'existe pas ou si son contenu est invalide,
+        une liste vide est retournée.
 
         Returns
         -------
@@ -100,7 +105,7 @@ class MemoryService:
         """
         Sauvegarde les entrées mémoire dans le fichier JSON.
 
-        Le dossier parent est créé automatiquement si nécessaire.
+        Le dossier `data/memory/` est créé automatiquement si nécessaire.
 
         Parameters
         ----------
@@ -128,7 +133,7 @@ class MemoryService:
         Returns
         -------
         dict[str, Any] | None
-            Dernière entrée enregistrée, ou `None` si la mémoire est vide.
+            Dernière entrée enregistrée, ou None si la mémoire est vide.
         """
         entries = self.load_memory()
         return entries[-1] if entries else None
@@ -138,8 +143,8 @@ class MemoryService:
         Recherche une question déjà posée à l'identique.
 
         La comparaison est effectuée sur une version normalisée
-        du texte afin de limiter l'effet des variations de casse,
-        de ponctuation ou d'espacement.
+        du texte afin de limiter les variations de casse,
+        de ponctuation et d'espacement.
 
         Parameters
         ----------
@@ -149,7 +154,7 @@ class MemoryService:
         Returns
         -------
         dict[str, Any] | None
-            Entrée mémoire correspondante si elle existe, sinon `None`.
+            Entrée mémoire correspondante si elle existe, sinon None.
         """
         normalized_question = self._normalize(question)
 
@@ -168,11 +173,13 @@ class MemoryService:
         """
         Ajoute une nouvelle entrée dans la mémoire persistée.
 
-        Une entrée mémoire contient la question posée, la réponse
-        générée et, si disponible, les documents associés à cette réponse.
+        Une entrée mémoire contient :
+        - la question posée
+        - la réponse générée
+        - les documents associés (optionnel)
 
-        La mémoire est tronquée automatiquement pour ne conserver
-        que les `max_entries` entrées les plus récentes.
+        La mémoire est tronquée automatiquement pour conserver
+        uniquement les `max_entries` entrées les plus récentes.
 
         Parameters
         ----------
@@ -181,7 +188,7 @@ class MemoryService:
         answer : str
             Réponse générée par le système.
         documents : list[dict[str, Any]] | None, default=None
-            Liste éventuelle des documents associés à la réponse.
+            Documents associés à la réponse.
 
         Returns
         -------
@@ -210,24 +217,20 @@ class MemoryService:
         """
         Construit un contexte mémoire léger à partir d'une question.
 
-        Si une question identique a déjà été posée, la méthode retourne
-        un court rappel contenant la question passée et un extrait de
-        la réponse précédente. Ce contexte peut ensuite être injecté
-        dans le prompt du système.
+        Si une question identique a déjà été posée, un rappel est généré
+        contenant la question passée et un extrait de la réponse.
 
         Parameters
         ----------
         question : str
             Question actuelle de l'utilisateur.
         max_chars : int, default=600
-            Nombre maximum de caractères conservés pour l'aperçu
-            de la réponse passée.
+            Nombre maximum de caractères pour l'extrait.
 
         Returns
         -------
         str
-            Texte de contexte mémoire, ou chaîne vide si aucun rappel
-            pertinent n'est trouvé.
+            Texte de contexte mémoire ou chaîne vide.
         """
         entry = self.find_exact_question(question)
 
@@ -248,7 +251,7 @@ class MemoryService:
         """
         Extrait un numéro de choix depuis une formulation utilisateur.
 
-        Cette méthode permet d'interpréter des expressions comme :
+        Exemples pris en charge :
         - "choix 2"
         - "numéro 1"
         - "je prends le 3"
@@ -257,12 +260,12 @@ class MemoryService:
         Parameters
         ----------
         question : str
-            Formulation utilisateur à analyser.
+            Texte utilisateur.
 
         Returns
         -------
         int | None
-            Numéro extrait si un choix est détecté, sinon `None`.
+            Numéro extrait ou None.
         """
         normalized = self._normalize(question)
 
@@ -280,21 +283,18 @@ class MemoryService:
         """
         Construit une réponse ciblée à partir d'un choix utilisateur.
 
-        Lorsqu'un utilisateur fait référence à un numéro parmi les
-        événements précédemment proposés, cette méthode retrouve le
-        document correspondant dans la dernière entrée mémoire et
-        génère une réponse synthétique centrée sur cet événement.
+        Cette méthode permet de récupérer un document précis parmi
+        ceux proposés précédemment, en fonction du numéro sélectionné.
 
         Parameters
         ----------
         question : str
-            Formulation utilisateur contenant un numéro de choix.
+            Question contenant un numéro de choix.
 
         Returns
         -------
         dict[str, Any] | None
-            Réponse structurée prête à être renvoyée par l'API,
-            ou `None` si aucun choix valide n'a pu être interprété.
+            Réponse structurée ou None si aucun choix valide.
         """
         choice_number = self.extract_choice_number(question)
         if choice_number is None:
@@ -308,7 +308,6 @@ class MemoryService:
         if not documents or choice_number < 1 or choice_number > len(documents):
             return None
 
-        # Sélection du document correspondant au numéro choisi.
         selected_doc = documents[choice_number - 1]
 
         title = selected_doc.get("title", "")
@@ -319,7 +318,6 @@ class MemoryService:
         event_type = selected_doc.get("event_type", "")
         url = selected_doc.get("url", "")
 
-        # Construction d'un texte de date lisible selon les informations disponibles.
         date_text = first_date
         if first_date and last_date and first_date != last_date:
             date_text = f"du {first_date} au {last_date}"

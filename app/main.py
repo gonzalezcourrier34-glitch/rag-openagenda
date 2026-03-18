@@ -26,7 +26,9 @@ from app.schemas import (
     RebuildRequest,
     RebuildResponse
 )
+
 from app.security import require_api_key
+from datetime import datetime
 
 app = FastAPI(
     title="OpenAgenda RAG API",
@@ -104,6 +106,82 @@ def ask(payload: AskRequest) -> AskResponse:
 
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"Erreur interne : {str(exc)}")
+
+@app.post(
+    "/ask/debug",
+    summary="Endpoint de debug pour inspection du pipeline RAG",
+    dependencies=[Depends(require_api_key)],
+)
+def ask_debug(payload: AskRequest) -> dict:
+    """
+    Exécute le pipeline RAG en mode debug avec accès complet aux contextes.
+
+    Cet endpoint est destiné à l'analyse, au debugging et à l'évaluation
+    du système RAG (ex : Ragas). Contrairement à `/ask`, il expose
+    explicitement les documents récupérés ainsi que leur contenu brut.
+
+    Le traitement suit les étapes suivantes :
+    1. récupération des documents pertinents via le moteur de recherche vectoriel
+    2. génération de la réponse à partir des documents
+    3. retour de la réponse accompagnée des contextes et métadonnées
+
+    Parameters
+    ----------
+    payload : AskRequest
+        Corps de requête contenant la question utilisateur.
+
+    Returns
+    -------
+    dict
+        Dictionnaire contenant :
+        - question : question utilisateur
+        - answer : réponse générée par le modèle
+        - contexts : liste des contenus textuels des documents récupérés
+        - metadata : liste des métadonnées associées aux documents
+
+    Raises
+    ------
+    HTTPException
+        400 : question invalide
+        503 : index vectoriel indisponible
+        500 : erreur interne du serveur
+    """
+    try:
+        question = payload.question.strip()
+        current_date = datetime.today().strftime("%Y-%m-%d")
+
+        if not question:
+            raise ValueError("La question ne peut pas être vide.")
+        
+        #retrieval
+        docs = rag_service.retrieve(question)
+
+        #génération
+        answer = rag_service.generate(
+            question=question,
+            docs=docs,
+            current_date=current_date
+        )
+
+        #construction de la réponse debug
+        return {
+            "question": question,
+            "answer": answer,
+            "contexts": [doc.page_content for doc in docs],
+            "metadata": [doc.metadata for doc in docs],
+        }
+
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Erreur interne (debug RAG) : {str(exc)}"
+        )
 
 @app.post(
     "/rebuild",
