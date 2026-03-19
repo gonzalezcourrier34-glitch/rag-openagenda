@@ -15,29 +15,37 @@ Le déroulement général du pipeline suit les étapes suivantes :
 
 1. vérification d'un éventuel choix utilisateur basé sur la mémoire
 2. recherche d'une question déjà posée à l'identique
-3. récupération des documents pertinents dans l'index vectoriel
-4. construction d'un contexte combinant mémoire et documents
-5. génération de la réponse finale
-6. sauvegarde de l'échange dans la mémoire locale
+3. récupération initiale de documents candidats dans l'index vectoriel
+4. extraction de filtres métier depuis la question
+5. filtrage et reranking des documents candidats
+6. construction d'un contexte combinant mémoire et documents
+7. génération de la réponse finale
+8. sauvegarde de l'échange dans la mémoire locale
 
 L'objectif est de conserver le contexte documentaire comme source
-principale d'information, tout en rendant les échanges plus fluides
-dans une logique conversationnelle.
+principale d'information, tout en améliorant la pertinence du retrieval
+grâce à une logique métier simple fondée sur les métadonnées
+des événements.
 """
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
 
+from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_community.vectorstores import FAISS
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 
+from app.document_service import (
+    doc_matches_filters,
+    extract_filters_from_question,
+    score_document,
+)
 from app.memory_service import MemoryService
 from app.schemas import AskResponse, RetrievedDocument
 
-from datetime import datetime
 
 # Racine du projet
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -59,6 +67,8 @@ class RAGService:
     - un stockage vectoriel FAISS pour la recherche sémantique
     - un service de mémoire locale pour réutiliser certains échanges
     - un modèle de langage pour produire la réponse finale
+    - un ensemble de fonctions documentaires pour filtrer et reranker
+      les événements en fonction de la question
 
     Parameters
     ----------
@@ -73,7 +83,10 @@ class RAGService:
     temperature : float, default=0.2
         Température utilisée par le modèle de langage.
     default_k : int, default=3
-        Nombre de documents récupérés par défaut lors du retrieval.
+        Nombre de documents retournés par défaut après reranking.
+    initial_fetch_k : int, default=10
+        Nombre initial de documents candidats récupérés avant filtrage
+        et reranking.
     """
 
     def __init__(
@@ -84,10 +97,12 @@ class RAGService:
         llm_model: str = "mistral-small-latest",
         temperature: float = 0.2,
         default_k: int = 3,
+        initial_fetch_k: int = 10,
     ) -> None:
         self.documents = documents or []
         self.index_dir = Path(index_dir)
         self.default_k = default_k
+        self.initial_fetch_k = initial_fetch_k
 
         # Modèle d'embedding utilisé pour vectoriser les documents.
         self.embeddings = MistralAIEmbeddings(model=embedding_model)
@@ -119,9 +134,11 @@ mais tu ne dois jamais inventer d'événement qui ne serait pas présent dans le
 Règles :
 - N'invente aucun événement
 - Utilise uniquement les événements présents dans le contexte
-- Respecte strictement les contraintes de la question (date, gratuité, type, etc.)
-- Si une information demandée n'est pas explicitement présente dans le contexte, ne pas l'inventer
-- Si plusieurs événements sont pertinents, présente-les séparément.
+- Respecte strictement les contraintes de la question comme la date,
+  la période, le lieu, la ville, la gratuité ou le type d'événement
+- Si une information demandée n'est pas explicitement présente dans le contexte,
+  ne pas l'inventer
+- Si plusieurs événements sont pertinents, présente-les séparément
 - Si aucune information n’est disponible, réponds exactement :
 "Je ne trouve pas d'événement correspondant, je suis un assistant qui ne peut vous conseiller que des événements culturels."
 
@@ -149,7 +166,7 @@ Mémoire :
 Contexte documentaire :
 {context}
 """
-)
+        )
 
         # Chaîne complète : prompt -> modèle -> sortie texte.
         self.chain = self.prompt | self.llm | StrOutputParser()
@@ -168,7 +185,7 @@ Contexte documentaire :
             Date actuelle au format YYYY-MM-DD.
         """
         return datetime.today().strftime("%Y-%m-%d")
-    
+
     def set_documents(self, documents: list[Document]) -> None:
         """
         Définit la liste de documents utilisée par le service.
@@ -242,7 +259,7 @@ Contexte documentaire :
         self.vectorstore = FAISS.load_local(
             str(self.index_dir),
             self.embeddings,
-            allow_dangerous_deserialization=True
+            allow_dangerous_deserialization=True,
         )
 
     def ensure_index_ready(self) -> None:
@@ -250,9 +267,14 @@ Contexte documentaire :
         Vérifie que l'index vectoriel est prêt à être utilisé.
 
         Si l'index n'est pas encore chargé en mémoire, il est
-        automatiquement chargé depuis le disque.
+        automatiquement chargé depuis le disque ou reconstruit
+        à partir des documents déjà disponibles.
 
-        ou reconstruit
+        Raises
+        ------
+        FileNotFoundError
+            Si aucun index n'est disponible et qu'aucun document
+            n'est présent pour le reconstruire.
         """
         if self.vectorstore is None:
             if self.index_dir.exists():
@@ -266,22 +288,30 @@ Contexte documentaire :
 
     def retrieve(self, question: str, k: int | None = None) -> list[Document]:
         """
-        Récupère les documents les plus proches d'une question.
+        Récupère les documents les plus pertinents pour une question.
 
-        La recherche est effectuée dans l'index vectoriel FAISS
-        à partir de la représentation sémantique de la question.
+        La méthode suit une logique en plusieurs étapes :
+
+        1. récupération initiale de documents candidats via la recherche sémantique
+        2. extraction de filtres métier depuis la question
+        3. filtrage des documents incompatibles avec la requête
+        4. reranking des documents restants
+        5. retour des `k` meilleurs documents
+
+        Si le filtrage s'avère trop strict et élimine tous les candidats,
+        le service retombe sur les résultats bruts issus du moteur vectoriel.
 
         Parameters
         ----------
         question : str
             Question posée par l'utilisateur.
         k : int | None, default=None
-            Nombre de documents à récupérer. Si None, utilise `default_k`.
+            Nombre de documents à retourner. Si None, utilise `default_k`.
 
         Returns
         -------
         list[Document]
-            Liste des documents les plus proches.
+            Liste des documents jugés les plus pertinents.
 
         Raises
         ------
@@ -294,13 +324,38 @@ Contexte documentaire :
         self.ensure_index_ready()
 
         final_k = self.default_k if k is None else k
+        initial_k = max(self.initial_fetch_k, final_k * 3)
 
-        docs = self.vectorstore.similarity_search(
+        # Première récupération large de documents candidats.
+        raw_docs = self.vectorstore.similarity_search(
             question.strip(),
-            k=final_k
+            k=initial_k,
         )
 
-        return docs
+        # Extraction de filtres métier à partir de la question
+        # et des métadonnées connues dans les documents candidats.
+        filters = extract_filters_from_question(
+            question=question,
+            documents=raw_docs if raw_docs else self.documents,
+        )
+
+        # Filtrage documentaire fondé sur les métadonnées.
+        filtered_docs = [
+            doc for doc in raw_docs
+            if doc_matches_filters(doc, filters)
+        ]
+
+        # Si le filtrage est trop strict, on conserve les documents bruts.
+        candidate_docs = filtered_docs if filtered_docs else raw_docs
+
+        # Reranking métier des documents conservés.
+        ranked_docs = sorted(
+            candidate_docs,
+            key=lambda doc: score_document(question, doc, filters),
+            reverse=True,
+        )
+
+        return ranked_docs[:final_k]
 
     def format_docs(self, docs: list[Document]) -> str:
         """
@@ -376,14 +431,14 @@ Contenu : {doc.page_content}
 
         return {
             "context": context,
-            "memory_context": memory_context
+            "memory_context": memory_context,
         }
 
     def generate(
         self,
         question: str,
         docs: list[Document],
-        current_date: str
+        current_date: str,
     ) -> str:
         """
         Génère une réponse à partir de la question et des documents récupérés.
@@ -445,7 +500,7 @@ Contenu : {doc.page_content}
             last_date=metadata.get("last_date", ""),
             event_type=metadata.get("event_type", ""),
             url=metadata.get("url", ""),
-            score=None
+            score=None,
         )
 
     def ask(self, question: str, k: int | None = None) -> AskResponse:
@@ -455,7 +510,7 @@ Contenu : {doc.page_content}
         Le traitement suit les étapes suivantes :
         1. vérification d'une éventuelle référence à un choix précédent
         2. recherche d'une question identique déjà présente en mémoire
-        3. retrieval documentaire dans l'index vectoriel
+        3. retrieval documentaire avec filtrage et reranking
         4. génération de la réponse
         5. sauvegarde du nouvel échange en mémoire
 
@@ -499,13 +554,13 @@ Contenu : {doc.page_content}
                 question=question,
                 answer=choice_result.get("answer", ""),
                 n_docs=len(choice_docs),
-                documents=choice_docs
+                documents=choice_docs,
             )
 
             self.memory_service.add_entry(
                 question=question,
                 answer=response.answer,
-                documents=[doc.model_dump() for doc in response.documents]
+                documents=[doc.model_dump() for doc in response.documents],
             )
 
             return response
@@ -522,13 +577,13 @@ Contenu : {doc.page_content}
                 question=question,
                 answer=exact_memory.get("answer", ""),
                 n_docs=len(memory_docs),
-                documents=memory_docs
+                documents=memory_docs,
             )
 
             self.memory_service.add_entry(
                 question=question,
                 answer=response.answer,
-                documents=[doc.model_dump() for doc in response.documents]
+                documents=[doc.model_dump() for doc in response.documents],
             )
 
             return response
@@ -550,14 +605,14 @@ Contenu : {doc.page_content}
             question=question,
             answer=answer,
             n_docs=len(docs),
-            documents=retrieved_docs
+            documents=retrieved_docs,
         )
 
         # Sauvegarde de la nouvelle interaction dans la mémoire locale.
         self.memory_service.add_entry(
             question=question,
             answer=answer,
-            documents=[doc.model_dump() for doc in retrieved_docs]
+            documents=[doc.model_dump() for doc in retrieved_docs],
         )
 
         return response

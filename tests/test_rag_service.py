@@ -93,6 +93,29 @@ def patched_rag(monkeypatch):
     monkeypatch.setattr("app.rag_service.MistralAIEmbeddings", FakeEmbeddings)
     monkeypatch.setattr("app.rag_service.ChatMistralAI", fake_llm_factory)
     monkeypatch.setattr("app.rag_service.MemoryService", FakeMemoryService)
+
+    # Neutralise la logique documentaire pour garder des tests stables
+    # et focalisés sur l'orchestration du service RAG.
+    monkeypatch.setattr(
+        "app.rag_service.extract_filters_from_question",
+        lambda question, documents: {
+            "cities": [],
+            "locations": [],
+            "event_types": [],
+            "date_start": None,
+            "date_end": None,
+            "keywords": [],
+        },
+    )
+    monkeypatch.setattr(
+        "app.rag_service.doc_matches_filters",
+        lambda doc, filters: True,
+    )
+    monkeypatch.setattr(
+        "app.rag_service.score_document",
+        lambda question, doc, filters: 0.0,
+    )
+
     return monkeypatch
 
 
@@ -167,6 +190,42 @@ def test_retrieve_returns_docs(patched_rag, sample_documents):
     docs = rag.retrieve("architecture", k=1)
 
     assert len(docs) == 1
+    assert docs[0].metadata["title"] == "Expo Archi"
+
+
+def test_retrieve_uses_initial_fetch_k(patched_rag, sample_documents):
+    rag = RAGService(default_k=2, initial_fetch_k=10)
+    fake_store = FakeVectorStore(sample_documents)
+    rag.vectorstore = fake_store
+
+    captured = {}
+
+    def fake_similarity_search(query, k=3):
+        captured["query"] = query
+        captured["k"] = k
+        return sample_documents
+
+    fake_store.similarity_search = fake_similarity_search
+
+    docs = rag.retrieve("architecture", k=2)
+
+    assert captured["query"] == "architecture"
+    assert captured["k"] == 10
+    assert len(docs) == 2
+
+
+def test_retrieve_falls_back_to_raw_docs_when_all_filtered_out(patched_rag, sample_documents, monkeypatch):
+    rag = RAGService()
+    rag.vectorstore = FakeVectorStore(sample_documents)
+
+    monkeypatch.setattr(
+        "app.rag_service.doc_matches_filters",
+        lambda doc, filters: False,
+    )
+
+    docs = rag.retrieve("architecture", k=2)
+
+    assert len(docs) == 2
     assert docs[0].metadata["title"] == "Expo Archi"
 
 

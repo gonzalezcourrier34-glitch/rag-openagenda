@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -35,8 +36,7 @@ class MemoryService:
     recherche d'une question identique et interprétation de choix
     utilisateur à partir des documents précédemment proposés.
 
-    La mémoire est stockée dans le fichier :
-    `data/memory/rag_memory.json`.
+    La mémoire est stockée dans un fichier JSON local.
 
     Parameters
     ----------
@@ -59,8 +59,9 @@ class MemoryService:
         Normalise un texte afin de faciliter les comparaisons.
 
         La normalisation applique plusieurs traitements simples :
-        mise en minuscules, suppression des espaces superflus et
-        retrait des caractères spéciaux non nécessaires.
+        - mise en minuscules
+        - suppression des espaces superflus
+        - retrait des caractères spéciaux non nécessaires
 
         Parameters
         ----------
@@ -105,7 +106,7 @@ class MemoryService:
         """
         Sauvegarde les entrées mémoire dans le fichier JSON.
 
-        Le dossier `data/memory/` est créé automatiquement si nécessaire.
+        Le dossier parent est créé automatiquement si nécessaire.
 
         Parameters
         ----------
@@ -176,7 +177,8 @@ class MemoryService:
         Une entrée mémoire contient :
         - la question posée
         - la réponse générée
-        - les documents associés (optionnel)
+        - les documents associés
+        - un horodatage simple de création
 
         La mémoire est tronquée automatiquement pour conserver
         uniquement les `max_entries` entrées les plus récentes.
@@ -198,9 +200,10 @@ class MemoryService:
         entries = self.load_memory()
 
         entry = {
-            "question": question.strip(),
-            "answer": answer.strip(),
-            "documents": documents or []
+            "question": (question or "").strip(),
+            "answer": (answer or "").strip(),
+            "documents": documents or [],
+            "created_at": datetime.now().isoformat(timespec="seconds"),
         }
 
         entries.append(entry)
@@ -220,12 +223,15 @@ class MemoryService:
         Si une question identique a déjà été posée, un rappel est généré
         contenant la question passée et un extrait de la réponse.
 
+        Cette mémoire n'a pas vocation à remplacer le contexte documentaire.
+        Elle sert uniquement de rappel conversationnel court.
+
         Parameters
         ----------
         question : str
             Question actuelle de l'utilisateur.
         max_chars : int, default=600
-            Nombre maximum de caractères pour l'extrait.
+            Nombre maximum de caractères pour l'extrait de réponse.
 
         Returns
         -------
@@ -237,15 +243,23 @@ class MemoryService:
         if not entry:
             return ""
 
-        answer_preview = entry.get("answer", "")[:max_chars]
+        answer = entry.get("answer", "").strip()
+        answer_preview = answer[:max_chars].strip()
 
-        return "\n".join(
-            [
-                "Souvenir",
-                f"Question passée : {entry.get('question', '')}",
-                f"Réponse passée : {answer_preview}"
-            ]
-        )
+        if len(answer) > max_chars:
+            answer_preview += "..."
+
+        lines = [
+            "Souvenir pertinent",
+            f"Question passée : {entry.get('question', '').strip()}",
+            f"Réponse passée : {answer_preview}",
+        ]
+
+        created_at = entry.get("created_at", "").strip()
+        if created_at:
+            lines.insert(1, f"Date du souvenir : {created_at}")
+
+        return "\n".join(line for line in lines if line.strip())
 
     def extract_choice_number(self, question: str) -> int | None:
         """
@@ -256,6 +270,7 @@ class MemoryService:
         - "numéro 1"
         - "je prends le 3"
         - "je veux le 2"
+        - "le 1"
 
         Parameters
         ----------
@@ -265,17 +280,20 @@ class MemoryService:
         Returns
         -------
         int | None
-            Numéro extrait ou None.
+            Numéro extrait ou None si aucun choix n'est détecté.
         """
         normalized = self._normalize(question)
 
-        match = re.search(r"\b(?:choix|num[eé]ro)\s+(\d+)\b", normalized)
-        if match:
-            return int(match.group(1))
+        patterns = [
+            r"\b(?:choix|numero|numéro)\s+(\d+)\b",
+            r"\b(?:je veux le|je prends le|je choisis le)\s+(\d+)\b",
+            r"\ble\s+(\d+)\b",
+        ]
 
-        match = re.search(r"\b(?:je veux le|je prends le|le)\s+(\d+)\b", normalized)
-        if match:
-            return int(match.group(1))
+        for pattern in patterns:
+            match = re.search(pattern, normalized)
+            if match:
+                return int(match.group(1))
 
         return None
 
@@ -284,7 +302,8 @@ class MemoryService:
         Construit une réponse ciblée à partir d'un choix utilisateur.
 
         Cette méthode permet de récupérer un document précis parmi
-        ceux proposés précédemment, en fonction du numéro sélectionné.
+        ceux proposés précédemment, en fonction du numéro sélectionné
+        dans le dernier échange enregistré en mémoire.
 
         Parameters
         ----------
@@ -294,7 +313,7 @@ class MemoryService:
         Returns
         -------
         dict[str, Any] | None
-            Réponse structurée ou None si aucun choix valide.
+            Réponse structurée ou None si aucun choix valide n'est détecté.
         """
         choice_number = self.extract_choice_number(question)
         if choice_number is None:
@@ -305,7 +324,10 @@ class MemoryService:
             return None
 
         documents = last_entry.get("documents", [])
-        if not documents or choice_number < 1 or choice_number > len(documents):
+        if not documents:
+            return None
+
+        if choice_number < 1 or choice_number > len(documents):
             return None
 
         selected_doc = documents[choice_number - 1]
@@ -330,7 +352,7 @@ class MemoryService:
             f"Titre : {title}",
             f"Lieu : {location_name}",
             f"Ville : {city}",
-            f"Date : {date_text}"
+            f"Date : {date_text}",
         ]
 
         if event_type:
@@ -340,8 +362,8 @@ class MemoryService:
             lines.append(f"Lien : {url}")
 
         return {
-            "question": question.strip(),
+            "question": (question or "").strip(),
             "answer": "\n".join(line for line in lines if line.strip()),
             "n_docs": 1,
-            "documents": [selected_doc]
+            "documents": [selected_doc],
         }

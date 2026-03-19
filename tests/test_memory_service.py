@@ -134,10 +134,14 @@ def test_add_entry(tmp_path: Path):
     assert entry["question"] == "Ma question"
     assert entry["answer"] == "Ma réponse"
     assert entry["documents"] == [{"title": "Doc 1"}]
+    assert "created_at" in entry
+    assert isinstance(entry["created_at"], str)
+    assert entry["created_at"]
 
     loaded = memory.load_memory()
     assert len(loaded) == 1
     assert loaded[0]["question"] == "Ma question"
+    assert "created_at" in loaded[0]
 
 
 def test_add_entry_respects_max_entries(tmp_path: Path):
@@ -167,9 +171,10 @@ def test_build_memory_context_found(tmp_path: Path):
 
     context = memory.build_memory_context("je cherche une exposition")
 
-    assert "Souvenir" in context
+    assert "Souvenir pertinent" in context
     assert "Question passée : Je cherche une exposition" in context
     assert "Réponse passée : Voici une réponse assez longue" in context
+    assert "Date du souvenir :" in context
 
 
 def test_build_memory_context_not_found(tmp_path: Path):
@@ -195,7 +200,7 @@ def test_build_memory_context_max_chars(tmp_path: Path):
 
     context = memory.build_memory_context("Question test", max_chars=5)
 
-    assert "Réponse passée : abcde" in context
+    assert "Réponse passée : abcde..." in context
 
 
 def test_extract_choice_number_choix():
@@ -220,6 +225,12 @@ def test_extract_choice_number_je_veux():
     memory = MemoryService()
 
     assert memory.extract_choice_number("je veux le 1") == 1
+
+
+def test_extract_choice_number_le():
+    memory = MemoryService()
+
+    assert memory.extract_choice_number("le 1") == 1
 
 
 def test_extract_choice_number_not_found():

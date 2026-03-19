@@ -5,7 +5,7 @@ from app.security import require_api_key
 
 
 class FakeRAGService:
-    def ask(self, question: str):
+    def ask(self, question: str, k: int | None = None):
         from app.schemas import AskResponse, RetrievedDocument
 
         return AskResponse(
@@ -62,13 +62,14 @@ def test_ask(monkeypatch):
     data = response.json()
     assert "answer" in data
     assert data["n_docs"] == 1
+    assert data["question"] == "Je cherche une exposition d'architecture à Montpellier"
 
 
 def test_rebuild(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGService())
     monkeypatch.setattr(
         "app.main.load_documents",
-        lambda zone, scope: ["fake_doc_1", "fake_doc_2", "fake_doc_3"],
+        lambda zone, scope, source="api": ["fake_doc_1", "fake_doc_2", "fake_doc_3"],
     )
     client = TestClient(app)
 

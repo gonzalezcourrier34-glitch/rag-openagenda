@@ -8,14 +8,20 @@ from app.document_service import (
     _safe,
     build_event_document,
     build_indexable_text,
+    doc_matches_filters,
+    extract_filters_from_question,
     fetch_and_save_events,
     fetch_openagenda_events,
+    get_known_metadata_values,
     load_documents,
     load_events_from_csv,
     load_events_from_json,
     normalize_events,
+    normalize_text,
+    parse_date_filters,
     save_events_to_csv,
     save_events_to_json,
+    score_document,
     search_agendas_for_zone,
 )
 
@@ -33,6 +39,38 @@ class FakeResponse:
         return self._payload
 
 
+@pytest.fixture
+def sample_documents():
+    return [
+        Document(
+            page_content="Exposition architecture à Montpellier",
+            metadata={
+                "title": "Expo Archi",
+                "location_name": "Musée Fabre",
+                "city": "Montpellier",
+                "region": "Occitanie",
+                "first_date": "2025-09-20",
+                "last_date": "2025-09-21",
+                "event_type": "Exposition",
+                "url": "http://test.com",
+            },
+        ),
+        Document(
+            page_content="Concert jazz à Sète",
+            metadata={
+                "title": "Jazz Night",
+                "location_name": "Salle Y",
+                "city": "Sète",
+                "region": "Occitanie",
+                "first_date": "2025-09-15",
+                "last_date": "2025-09-15",
+                "event_type": "Concert",
+                "url": "http://concert.com",
+            },
+        ),
+    ]
+
+
 def test_safe_none():
     assert _safe(None) == ""
 
@@ -40,6 +78,11 @@ def test_safe_none():
 def test_safe_value():
     assert _safe(123) == "123"
     assert _safe("abc") == "abc"
+
+
+def test_normalize_text_basic():
+    assert normalize_text("  Musée Fabre  ") == "musee fabre"
+    assert normalize_text("Événement   Culturel") == "evenement culturel"
 
 
 def test_save_and_load_events_json(tmp_path: Path):
@@ -159,9 +202,9 @@ def test_build_indexable_text():
 
     assert "text_for_embedding" in result.columns
     text = result.loc[0, "text_for_embedding"]
-    assert "Expo" in text
-    assert "Architecture" in text
-    assert "Montpellier" in text
+    assert "Titre : Expo" in text
+    assert "Description : Architecture" in text
+    assert "Ville : Montpellier" in text
 
 
 def test_build_event_document_with_prebuilt_text():
@@ -211,6 +254,100 @@ def test_build_event_document_without_prebuilt_text():
     assert "Description : Musique live" in doc.page_content
     assert doc.metadata["event_uid"] == "2"
     assert doc.metadata["city"] == "Sète"
+
+
+def test_get_known_metadata_values(sample_documents):
+    values = get_known_metadata_values(sample_documents)
+
+    assert "montpellier" in values["cities"]
+    assert "sete" in values["cities"]
+    assert "musee fabre" in values["locations"]
+    assert "exposition" in values["event_types"]
+    assert "concert" in values["event_types"]
+
+
+def test_parse_date_filters_month():
+    start, end = parse_date_filters("Quels événements à Montpellier en septembre 2025 ?")
+
+    assert start == "2025-09-01"
+    assert end == "2025-09-30"
+
+
+def test_parse_date_filters_exact_date():
+    start, end = parse_date_filters("Quels événements le 20 septembre 2025 ?")
+
+    assert start == "2025-09-20"
+    assert end == "2025-09-20"
+
+
+def test_parse_date_filters_range():
+    start, end = parse_date_filters("Quels événements du 20 au 21 septembre 2025 ?")
+
+    assert start == "2025-09-20"
+    assert end == "2025-09-21"
+
+
+def test_extract_filters_from_question(sample_documents):
+    filters = extract_filters_from_question(
+        question="Y a-t-il une exposition au Musée Fabre à Montpellier en septembre 2025 ?",
+        documents=sample_documents,
+    )
+
+    assert "montpellier" in filters["cities"]
+    assert "musee fabre" in filters["locations"]
+    assert "exposition" in filters["event_types"]
+    assert filters["date_start"] == "2025-09-01"
+    assert filters["date_end"] == "2025-09-30"
+
+
+def test_doc_matches_filters_true(sample_documents):
+    filters = {
+        "cities": ["montpellier"],
+        "locations": ["musee fabre"],
+        "event_types": ["exposition"],
+        "date_start": "2025-09-01",
+        "date_end": "2025-09-30",
+        "keywords": [],
+    }
+
+    assert doc_matches_filters(sample_documents[0], filters) is True
+
+
+def test_doc_matches_filters_false_city(sample_documents):
+    filters = {
+        "cities": ["montpellier"],
+        "locations": [],
+        "event_types": [],
+        "date_start": None,
+        "date_end": None,
+        "keywords": [],
+    }
+
+    assert doc_matches_filters(sample_documents[1], filters) is False
+
+
+def test_score_document_prefers_matching_doc(sample_documents):
+    filters = {
+        "cities": ["montpellier"],
+        "locations": ["musee fabre"],
+        "event_types": ["exposition"],
+        "date_start": "2025-09-01",
+        "date_end": "2025-09-30",
+        "keywords": ["architecture"],
+    }
+
+    score_0 = score_document(
+        question="Je cherche une exposition d'architecture au Musée Fabre à Montpellier",
+        doc=sample_documents[0],
+        filters=filters,
+    )
+    score_1 = score_document(
+        question="Je cherche une exposition d'architecture au Musée Fabre à Montpellier",
+        doc=sample_documents[1],
+        filters=filters,
+    )
+
+    assert score_0 > score_1
 
 
 def test_search_agendas_for_zone_ok(monkeypatch):

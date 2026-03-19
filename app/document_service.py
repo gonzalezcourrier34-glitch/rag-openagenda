@@ -1,7 +1,7 @@
 """
-Services de chargement et de préparation des documents OpenAgenda.
+Services de chargement, de préparation et d'exploitation des documents OpenAgenda.
 
-Ce module gère l'ensemble de la préparation documentaire du pipeline RAG.
+Ce module centralise la logique documentaire du pipeline RAG.
 Il permet de :
 
 - rechercher les agendas liés à une zone géographique
@@ -9,21 +9,28 @@ Il permet de :
 - normaliser les données dans un format tabulaire stable
 - construire un texte adapté à l'embedding
 - convertir les événements en objets `Document` LangChain
+- extraire des filtres simples depuis une question utilisateur
+- filtrer et scorer des documents pour améliorer le retrieval
 
 Les documents produits par ce module servent ensuite à construire
-l'index vectoriel du système RAG.
+l'index vectoriel du système RAG et à améliorer la pertinence
+des résultats renvoyés au moment de la recherche.
 """
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import requests
 from langchain_core.documents import Document
 
 from app.config import OPENAGENDA_API_KEY
+
 
 # Fenêtre temporelle utilisée pour récupérer les événements :
 # de l'année précédente jusqu'à aujourd'hui.
@@ -43,6 +50,7 @@ PROCESSED_DIR = DATA_DIR / "processed"
 DEFAULT_JSON_PATH = RAW_DIR / "openagenda_events.json"
 DEFAULT_CSV_PATH = PROCESSED_DIR / "openagenda_events.csv"
 
+
 def _safe(value: object) -> str:
     """
     Convertit une valeur potentiellement nulle en chaîne de caractères.
@@ -53,7 +61,7 @@ def _safe(value: object) -> str:
 
     Parameters
     ----------
-    value : Any
+    value : object
         Valeur à convertir.
 
     Returns
@@ -62,6 +70,33 @@ def _safe(value: object) -> str:
         Chaîne vide si la valeur est nulle, sinon représentation texte.
     """
     return "" if value is None else str(value)
+
+
+def normalize_text(text: str) -> str:
+    """
+    Normalise un texte pour faciliter les comparaisons lexicales.
+
+    La normalisation applique :
+    - passage en minuscules
+    - suppression des accents
+    - nettoyage des espaces multiples
+
+    Parameters
+    ----------
+    text : str
+        Texte à normaliser.
+
+    Returns
+    -------
+    str
+        Texte normalisé.
+    """
+    text = _safe(text).lower().strip()
+    text = unicodedata.normalize("NFKD", text)
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    text = re.sub(r"\s+", " ", text)
+    return text
+
 
 def save_events_to_json(events: list[dict], output_path: str | Path) -> None:
     """
@@ -80,6 +115,7 @@ def save_events_to_json(events: list[dict], output_path: str | Path) -> None:
     with path.open("w", encoding="utf-8") as f:
         json.dump(events, f, ensure_ascii=False, indent=2)
 
+
 def save_events_to_csv(df: pd.DataFrame, output_path: str | Path) -> None:
     """
     Sauvegarde les événements normalisés au format CSV.
@@ -95,6 +131,7 @@ def save_events_to_csv(df: pd.DataFrame, output_path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
 
     df.to_csv(path, index=False, encoding="utf-8")
+
 
 def load_events_from_json(input_path: str | Path) -> list[dict]:
     """
@@ -117,7 +154,8 @@ def load_events_from_json(input_path: str | Path) -> list[dict]:
 
     with path.open("r", encoding="utf-8") as f:
         return json.load(f)
-    
+
+
 def load_events_from_csv(input_path: str | Path) -> pd.DataFrame:
     """
     Charge les événements normalisés depuis un fichier CSV.
@@ -139,6 +177,7 @@ def load_events_from_csv(input_path: str | Path) -> pd.DataFrame:
 
     return pd.read_csv(path).fillna("")
 
+
 def build_event_document(event: dict) -> Document:
     """
     Construit un objet `Document` LangChain à partir d'un événement.
@@ -153,7 +192,8 @@ def build_event_document(event: dict) -> Document:
     Les métadonnées sont conservées pour permettre :
     - la traçabilité des événements
     - l'affichage des informations dans l'API
-    - un éventuel filtrage ou enrichissement futur
+    - le filtrage métier au moment du retrieval
+    - le reranking documentaire
 
     Parameters
     ----------
@@ -167,7 +207,6 @@ def build_event_document(event: dict) -> Document:
         - un texte exploitable pour la recherche sémantique
         - des métadonnées descriptives
     """
-    # Récupération sécurisée des champs utiles
     event_uid = _safe(event.get("event_uid"))
     title = _safe(event.get("title"))
     description = _safe(event.get("description"))
@@ -181,8 +220,6 @@ def build_event_document(event: dict) -> Document:
     agenda_uid = _safe(event.get("agenda_uid"))
     text_for_embedding = _safe(event.get("text_for_embedding"))
 
-    # Si un texte consolidé existe déjà, on l'utilise.
-    # Sinon, on reconstruit un contenu simple à partir des champs utiles.
     page_content = text_for_embedding if text_for_embedding else "\n".join(
         part for part in [
             f"Titre : {title}",
@@ -192,12 +229,11 @@ def build_event_document(event: dict) -> Document:
             f"Région : {region}",
             f"Date de début : {first_date}",
             f"Date de fin : {last_date}",
-            f"Type d'événement : {event_type}"
+            f"Type d'événement : {event_type}",
         ]
         if part and part.split(" : ", 1)[-1].strip()
     )
 
-    # Métadonnées associées au document
     metadata = {
         "doc_id": f"openagenda_{event_uid}",
         "chunk_id": f"openagenda_{event_uid}_0",
@@ -212,7 +248,7 @@ def build_event_document(event: dict) -> Document:
         "last_date": last_date,
         "event_type": event_type,
         "url": source_url,
-        "lang": "fr"
+        "lang": "fr",
     }
 
     return Document(page_content=page_content, metadata=metadata)
@@ -250,7 +286,6 @@ def search_agendas_for_zone(
     requests.HTTPError
         Si l'appel HTTP échoue.
     """
-    # Vérification de la présence de la clé API
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante dans le fichier .env")
 
@@ -258,23 +293,21 @@ def search_agendas_for_zone(
     headers = {"key": OPENAGENDA_API_KEY}
     params = {
         "search": zone,
-        "size" : size #limite voulu pour economie
+        "size": size,
     }
 
-    # Filtre optionnel pour ne récupérer que les agendas officiels
     if official:
         params["official"] = 1
 
-    # Appel API
     response = requests.get(url, headers=headers, params=params, timeout=30)
     response.raise_for_status()
     payload = response.json()
 
-    # Validation minimale de la structure de réponse
     if "agendas" not in payload:
         raise ValueError(f"Réponse inattendue : {list(payload.keys())}")
 
     return payload["agendas"]
+
 
 def fetch_openagenda_events(
     agenda_uid: str,
@@ -287,10 +320,8 @@ def fetch_openagenda_events(
     Récupère les événements d'un agenda OpenAgenda avec pagination.
 
     Cette fonction interroge l'API OpenAgenda pour extraire les événements
-    d'un agenda sur une période glissante allant d'aujourd'hui à 365 jours.
-
-    La pagination permet de récupérer un volume important d'événements
-    sans dépendre d'une seule réponse API.
+    d'un agenda sur une période glissante allant de l'année précédente
+    jusqu'à la date actuelle.
 
     Parameters
     ----------
@@ -302,7 +333,9 @@ def fetch_openagenda_events(
         Portée géographique du filtre, par exemple `city`.
     limit : int, default=300
         Nombre maximum d'événements récupérés par requête.
-        
+    max_pages : int, default=50
+        Nombre maximum de pages à interroger.
+
     Returns
     -------
     list[dict]
@@ -315,14 +348,12 @@ def fetch_openagenda_events(
     requests.HTTPError
         Si l'appel HTTP échoue.
     """
-    # Vérification de la clé API
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante dans le fichier .env")
 
     all_events = []
     offset = 0
 
-    # Boucle de pagination
     for _ in range(max_pages):
         url = f"https://openagenda.com/agendas/{agenda_uid}/events.json"
 
@@ -335,20 +366,18 @@ def fetch_openagenda_events(
             "oaq[to]": date_to,
             "oaq[what]": zone,
             "oaq[scope]": scope,
-            "oaq[order]": "latest"
+            "oaq[order]": "latest",
         }
 
         response = requests.get(url, params=params, timeout=30)
         response.raise_for_status()
         payload = response.json()
 
-        # Vérifie que la réponse contient bien une liste d'événements
         if "events" not in payload:
             raise ValueError(f"Réponse inattendue de l'API : {list(payload.keys())}")
 
         events = payload["events"]
 
-        # Si plus aucun événement, on arrête la pagination
         if not events:
             break
 
@@ -357,17 +386,17 @@ def fetch_openagenda_events(
         total = payload.get("total", 0)
         offset += limit
 
-        # Arrêt si tous les événements ont été récupérés
         if offset >= total:
             break
 
     return all_events
 
+
 def fetch_and_save_events(
     zone: str = "Montpellier",
     scope: str = "city",
-    json_path: str = "data/raw/openagenda_events.json",
-    csv_path: str = "data/processed/openagenda_events.csv"
+    json_path: str | Path = DEFAULT_JSON_PATH,
+    csv_path: str | Path = DEFAULT_CSV_PATH
 ) -> pd.DataFrame:
     """
     Récupère les événements OpenAgenda, puis les sauvegarde en JSON et CSV.
@@ -378,9 +407,9 @@ def fetch_and_save_events(
         Zone géographique ciblée.
     scope : str, default="city"
         Portée géographique utilisée pour filtrer les événements.
-    json_path : str, default="data/raw/openagenda_events.json"
+    json_path : str | Path, default=DEFAULT_JSON_PATH
         Chemin du fichier JSON de sauvegarde.
-    csv_path : str, default="data/processed/openagenda_events.csv"
+    csv_path : str | Path, default=DEFAULT_CSV_PATH
         Chemin du fichier CSV de sauvegarde.
 
     Returns
@@ -417,6 +446,7 @@ def fetch_and_save_events(
 
     return df_events
 
+
 def normalize_events(events: list[dict]) -> pd.DataFrame:
     """
     Normalise les événements OpenAgenda dans un schéma tabulaire stable.
@@ -441,7 +471,6 @@ def normalize_events(events: list[dict]) -> pd.DataFrame:
     pd.DataFrame
         DataFrame normalisé contenant les colonnes standard du pipeline.
     """
-    # Colonnes attendues dans le schéma final
     schema_cols = [
         "event_uid",
         "agenda_uid",
@@ -453,17 +482,14 @@ def normalize_events(events: list[dict]) -> pd.DataFrame:
         "first_date",
         "last_date",
         "event_type",
-        "source_url"
+        "source_url",
     ]
 
-    # Si aucun événement n'est présent, on retourne un DataFrame vide mais structuré
     if not events:
         return pd.DataFrame(columns=schema_cols)
 
-    # Aplatissement du JSON en tableau
     df = pd.json_normalize(events)
 
-    # Correspondance entre noms OpenAgenda et noms internes du projet
     rename_map = {
         "uid": "event_uid",
         "agenda.uid": "agenda_uid",
@@ -476,24 +502,20 @@ def normalize_events(events: list[dict]) -> pd.DataFrame:
         "eventType": "event_type",
         "location.name": "location_name",
         "location.city": "city",
-        "location.region": "region"
+        "location.region": "region",
     }
 
-    # On conserve uniquement les colonnes présentes dans le JSON
     existing_cols = [c for c in rename_map if c in df.columns]
     df = df[existing_cols].copy()
     df = df.rename(columns={c: rename_map[c] for c in existing_cols})
 
-    # Ajout des colonnes manquantes pour garantir un schéma stable
     for col in schema_cols:
         if col not in df.columns:
             df[col] = ""
 
-    # Nettoyage simple des valeurs
     for col in schema_cols:
         df[col] = df[col].fillna("").astype(str).str.strip()
 
-    # Nettoyage complémentaire sur les colonnes textuelles principales
     df["title"] = df["title"].str.replace(r"\s+", " ", regex=True).str.strip()
     df["description"] = df["description"].str.replace(r"\s+", " ", regex=True).str.strip()
 
@@ -511,6 +533,7 @@ def build_indexable_text(df: pd.DataFrame) -> pd.DataFrame:
     - la vectorisation
     - la recherche sémantique
     - le rappel contextuel du système RAG
+    - le retrieval sur des contraintes métier comme la date, le lieu ou le type
 
     Parameters
     ----------
@@ -524,19 +547,351 @@ def build_indexable_text(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    # Construction d'un texte unique regroupant les champs clés
     df["text_for_embedding"] = (
-        df["title"].fillna("") + "\n"
-        + df["description"].fillna("") + "\n"
-        + df["location_name"].fillna("") + "\n"
-        + df["city"].fillna("") + "\n"
-        + df["region"].fillna("") + "\n"
-        + df["first_date"].fillna("").astype(str) + "\n"
-        + df["last_date"].fillna("").astype(str) + "\n"
-        + df["event_type"].fillna("")
+        "Titre : " + df["title"].fillna("") + "\n"
+        + "Description : " + df["description"].fillna("") + "\n"
+        + "Lieu : " + df["location_name"].fillna("") + "\n"
+        + "Ville : " + df["city"].fillna("") + "\n"
+        + "Région : " + df["region"].fillna("") + "\n"
+        + "Date de début : " + df["first_date"].fillna("").astype(str) + "\n"
+        + "Date de fin : " + df["last_date"].fillna("").astype(str) + "\n"
+        + "Type d'événement : " + df["event_type"].fillna("")
+    )
+
+    df["text_for_embedding"] = (
+        df["text_for_embedding"]
+        .str.replace(r"\s+", " ", regex=True)
+        .str.replace(r"\n ", "\n", regex=False)
+        .str.strip()
     )
 
     return df
+
+
+def get_known_metadata_values(documents: list[Document]) -> dict[str, set[str]]:
+    """
+    Extrait les principales valeurs de métadonnées connues du corpus.
+
+    Cette fonction parcourt les documents disponibles afin de récupérer
+    les villes, lieux et types d'événements présents dans le corpus.
+    Ces valeurs servent ensuite à détecter automatiquement certains
+    filtres mentionnés dans une question utilisateur.
+
+    Parameters
+    ----------
+    documents : list[Document]
+        Documents du corpus.
+
+    Returns
+    -------
+    dict[str, set[str]]
+        Dictionnaire contenant :
+        - `cities`
+        - `locations`
+        - `event_types`
+    """
+    values = {
+        "cities": set(),
+        "locations": set(),
+        "event_types": set(),
+    }
+
+    for doc in documents:
+        md = doc.metadata or {}
+
+        city = md.get("city")
+        location = md.get("location_name")
+        event_type = md.get("event_type")
+
+        if city:
+            values["cities"].add(normalize_text(city))
+        if location:
+            values["locations"].add(normalize_text(location))
+        if event_type:
+            values["event_types"].add(normalize_text(event_type))
+
+    return values
+
+
+def parse_date_filters(question: str) -> tuple[str | None, str | None]:
+    """
+    Extrait une plage de dates simple à partir d'une question.
+
+    La fonction gère notamment :
+    - un mois et une année, par exemple "septembre 2025"
+    - une date précise, par exemple "20 septembre 2025"
+    - un intervalle simple, par exemple "20 au 21 septembre 2025"
+
+    Parameters
+    ----------
+    question : str
+        Question utilisateur.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Couple `(date_start, date_end)` au format YYYY-MM-DD.
+        Si aucune date n'est détectée, les deux valeurs sont `None`.
+    """
+    q = normalize_text(question)
+
+    month_map = {
+        "janvier": "01",
+        "fevrier": "02",
+        "mars": "03",
+        "avril": "04",
+        "mai": "05",
+        "juin": "06",
+        "juillet": "07",
+        "aout": "08",
+        "septembre": "09",
+        "octobre": "10",
+        "novembre": "11",
+        "decembre": "12",
+    }
+
+    range_pattern = (
+        r"(\d{1,2})\s+(?:au|et)\s+(\d{1,2})\s+"
+        r"(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)"
+        r"\s+(\d{4})"
+    )
+    match = re.search(range_pattern, q)
+    if match:
+        day1, day2, month_name, year = match.groups()
+        month_num = month_map[month_name]
+        return (
+            f"{year}-{month_num}-{int(day1):02d}",
+            f"{year}-{month_num}-{int(day2):02d}",
+        )
+
+    exact_pattern = (
+        r"(\d{1,2})\s+"
+        r"(janvier|fevrier|mars|avril|mai|juin|juillet|aout|septembre|octobre|novembre|decembre)"
+        r"\s+(\d{4})"
+    )
+    match = re.search(exact_pattern, q)
+    if match:
+        day, month_name, year = match.groups()
+        month_num = month_map[month_name]
+        exact_date = f"{year}-{month_num}-{int(day):02d}"
+        return exact_date, exact_date
+
+    for month_name, month_num in month_map.items():
+        pattern = rf"{month_name}\s+(\d{{4}})"
+        match = re.search(pattern, q)
+        if match:
+            year = match.group(1)
+
+            if month_num == "12":
+                date_end = f"{year}-12-31"
+            elif month_num in {"01", "03", "05", "07", "08", "10"}:
+                date_end = f"{year}-{month_num}-31"
+            elif month_num in {"04", "06", "09", "11"}:
+                date_end = f"{year}-{month_num}-30"
+            else:
+                date_end = f"{year}-{month_num}-28"
+
+            return f"{year}-{month_num}-01", date_end
+
+    return None, None
+
+
+def extract_filters_from_question(
+    question: str,
+    documents: list[Document],
+) -> dict[str, Any]:
+    """
+    Extrait des filtres métier à partir d'une question utilisateur.
+
+    Cette fonction identifie de manière heuristique :
+    - les villes présentes dans la question
+    - les lieux mentionnés
+    - les types d'événements
+    - une éventuelle plage de dates
+    - des mots-clés libres utiles pour le reranking
+
+    L'extraction s'appuie à la fois sur :
+    - les métadonnées connues du corpus
+    - des règles simples de normalisation et de détection
+
+    Parameters
+    ----------
+    question : str
+        Question utilisateur.
+    documents : list[Document]
+        Documents du corpus ou documents candidats.
+
+    Returns
+    -------
+    dict[str, Any]
+        Dictionnaire de filtres métier.
+    """
+    q = normalize_text(question)
+    known = get_known_metadata_values(documents)
+    date_start, date_end = parse_date_filters(q)
+
+    filters = {
+        "cities": [],
+        "locations": [],
+        "event_types": [],
+        "date_start": date_start,
+        "date_end": date_end,
+        "keywords": [],
+    }
+
+    for city in known["cities"]:
+        if city and city in q:
+            filters["cities"].append(city)
+
+    for location in known["locations"]:
+        if location and location in q:
+            filters["locations"].append(location)
+
+    for event_type in known["event_types"]:
+        if event_type and event_type in q:
+            filters["event_types"].append(event_type)
+
+    stopwords = {
+        "quel", "quels", "quelle", "quelles",
+        "y", "a", "t", "il", "des", "de", "du", "le", "la", "les",
+        "au", "aux", "dans", "en", "sur", "pour", "avec",
+        "ont", "lieu", "evenement", "evenements",
+        "proposes", "propose", "culturels", "culturel",
+        "septembre", "octobre", "novembre", "decembre",
+        "janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout",
+        "week", "end", "weekend",
+    }
+
+    tokens = re.findall(r"\b[a-z]{3,}\b", q)
+    filters["keywords"] = [
+        token
+        for token in tokens
+        if token not in stopwords
+        and token not in filters["cities"]
+        and token not in filters["locations"]
+        and token not in filters["event_types"]
+    ]
+
+    return filters
+
+
+def doc_matches_filters(doc: Document, filters: dict[str, Any]) -> bool:
+    """
+    Vérifie si un document respecte les filtres extraits de la question.
+
+    Le filtrage porte principalement sur :
+    - la ville
+    - le lieu
+    - le type d'événement
+    - la compatibilité temporelle
+
+    Parameters
+    ----------
+    doc : Document
+        Document candidat.
+    filters : dict[str, Any]
+        Filtres extraits depuis la question.
+
+    Returns
+    -------
+    bool
+        `True` si le document reste compatible avec les filtres,
+        sinon `False`.
+    """
+    md = doc.metadata or {}
+
+    city = normalize_text(md.get("city", ""))
+    location_name = normalize_text(md.get("location_name", ""))
+    event_type = normalize_text(md.get("event_type", ""))
+    first_date = _safe(md.get("first_date", "")).strip()
+    last_date = _safe(md.get("last_date", "")).strip()
+
+    if filters["cities"] and city not in filters["cities"]:
+        return False
+
+    if filters["locations"]:
+        if not any(loc in location_name for loc in filters["locations"]):
+            return False
+
+    if filters["event_types"]:
+        if not any(evt in event_type for evt in filters["event_types"]):
+            return False
+
+    date_start = filters.get("date_start")
+    date_end = filters.get("date_end")
+
+    if date_start and last_date and last_date < date_start:
+        return False
+
+    if date_end and first_date and first_date > date_end:
+        return False
+
+    return True
+
+
+def score_document(question: str, doc: Document, filters: dict[str, Any]) -> float:
+    """
+    Attribue un score métier à un document pour le reranking final.
+
+    Le score combine plusieurs signaux simples :
+    - correspondance de ville
+    - correspondance de lieu
+    - correspondance de type
+    - présence de mots-clés dans le contenu ou les métadonnées
+    - bonus léger si une contrainte temporelle est détectée
+
+    Parameters
+    ----------
+    question : str
+        Question utilisateur.
+    doc : Document
+        Document candidat.
+    filters : dict[str, Any]
+        Filtres extraits depuis la question.
+
+    Returns
+    -------
+    float
+        Score métier utilisé pour trier les documents.
+    """
+    md = doc.metadata or {}
+
+    city = normalize_text(md.get("city", ""))
+    location_name = normalize_text(md.get("location_name", ""))
+    event_type = normalize_text(md.get("event_type", ""))
+    full_text = normalize_text(
+        f"{doc.page_content} "
+        f"{md.get('title', '')} "
+        f"{md.get('location_name', '')} "
+        f"{md.get('city', '')} "
+        f"{md.get('event_type', '')}"
+    )
+
+    score = 0.0
+
+    if filters["cities"] and city in filters["cities"]:
+        score += 3.0
+
+    if filters["locations"] and any(loc in location_name for loc in filters["locations"]):
+        score += 3.0
+
+    if filters["event_types"] and any(evt in event_type for evt in filters["event_types"]):
+        score += 2.0
+
+    for keyword in filters["keywords"]:
+        if keyword in full_text:
+            score += 1.0
+
+    if filters.get("date_start") or filters.get("date_end"):
+        score += 1.0
+
+    normalized_question = normalize_text(question)
+    title = normalize_text(md.get("title", ""))
+    if title and any(token in title for token in normalized_question.split()):
+        score += 0.5
+
+    return score
+
 
 def load_documents(
     zone: str = "Montpellier",
@@ -559,6 +914,10 @@ def load_documents(
         - "api" : récupération depuis l'API OpenAgenda
         - "json" : lecture depuis un fichier JSON local
         - "csv" : lecture depuis un fichier CSV local
+    json_path : str | Path, default=DEFAULT_JSON_PATH
+        Chemin du fichier JSON local.
+    csv_path : str | Path, default=DEFAULT_CSV_PATH
+        Chemin du fichier CSV local.
 
     Returns
     -------
@@ -570,7 +929,7 @@ def load_documents(
             zone=zone,
             scope=scope,
             json_path=json_path,
-            csv_path=csv_path
+            csv_path=csv_path,
         )
 
     elif source == "json":
