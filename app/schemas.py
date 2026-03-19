@@ -8,7 +8,7 @@ Les modèles permettent :
 - la validation automatique des requêtes
 - la structuration des réponses
 - la génération automatique de la documentation Swagger
-  via FastAPI.
+  via FastAPI
 
 Chaque modèle correspond à une requête ou une réponse
 utilisée par les endpoints de l'API.
@@ -27,15 +27,18 @@ class RetrievedDocument(BaseModel):
     utilisées pour générer la réponse.
     """
 
-    title: str = ""
-    location_name: str = ""
-    city: str = ""
-    region: str = ""
-    first_date: str = ""
-    last_date: str = ""
-    event_type: str = ""
-    url: str = ""
-    score: float | None = None
+    title: str = Field(default="", description="Titre de l'événement.")
+    location_name: str = Field(default="", description="Nom du lieu de l'événement.")
+    city: str = Field(default="", description="Ville de l'événement.")
+    region: str = Field(default="", description="Région de l'événement.")
+    first_date: str = Field(default="", description="Date de début de l'événement.")
+    last_date: str = Field(default="", description="Date de fin de l'événement.")
+    event_type: str = Field(default="", description="Type d'événement.")
+    url: str = Field(default="", description="URL source de l'événement.")
+    score: float | None = Field(
+        default=None,
+        description="Score éventuel associé au document lors du retrieval."
+    )
 
 
 class AskRequest(BaseModel):
@@ -55,10 +58,13 @@ class AskResponse(BaseModel):
     Réponse retournée par l'endpoint `/ask`.
     """
 
-    question: str
-    answer: str
-    n_docs: int
-    documents: list[RetrievedDocument] = Field(default_factory=list)
+    question: str = Field(description="Question envoyée par l'utilisateur.")
+    answer: str = Field(description="Réponse générée par le système RAG.")
+    n_docs: int = Field(description="Nombre de documents utilisés pour produire la réponse.")
+    documents: list[RetrievedDocument] = Field(
+        default_factory=list,
+        description="Documents sources retournés par le moteur RAG."
+    )
 
 
 class RebuildRequest(BaseModel):
@@ -87,9 +93,9 @@ class RebuildResponse(BaseModel):
     Réponse retournée par l'endpoint `/rebuild`.
     """
 
-    status: str
-    message: str
-    n_docs_indexed: int
+    status: str = Field(description="Statut de l'opération de reconstruction.")
+    message: str = Field(description="Message décrivant le résultat de l'opération.")
+    n_docs_indexed: int = Field(description="Nombre de documents indexés.")
 
 
 class HealthResponse(BaseModel):
@@ -97,5 +103,5 @@ class HealthResponse(BaseModel):
     Réponse retournée par l'endpoint `/health`.
     """
 
-    status: str
-    index_loaded: bool
+    status: str = Field(description="Statut général du service.")
+    index_loaded: bool = Field(description="Indique si l'index vectoriel est chargé en mémoire.")

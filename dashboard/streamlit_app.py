@@ -18,6 +18,8 @@ L'interface repose sur Streamlit pour la partie front-end et sur
 des appels HTTP pour communiquer avec l'API.
 """
 
+from __future__ import annotations
+
 import sys
 from pathlib import Path
 
@@ -32,17 +34,11 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 from app.config import API_KEY, API_URL, DEFAULT_SCOPE, DEFAULT_ZONE
 
 
-# Configuration générale de la page Streamlit.
 st.set_page_config(
     page_title="Dashboard RAG OpenAgenda",
-    layout="wide"
+    layout="wide",
 )
 
-
-# Injection d'un CSS minimal pour garantir :
-# - une bonne lisibilité du texte
-# - des cartes homogènes
-# - une cohérence visuelle entre réponse, documents et historique
 st.markdown(
     """
     <style>
@@ -53,7 +49,7 @@ st.markdown(
         padding: 16px 18px;
         border-radius: 10px;
         margin-bottom: 20px;
-        line-height: 1.7
+        line-height: 1.7;
     }
 
     .card {
@@ -62,7 +58,7 @@ st.markdown(
         border: 1px solid #E5E7EB;
         border-radius: 12px;
         padding: 16px;
-        margin-bottom: 14px
+        margin-bottom: 14px;
     }
 
     .history {
@@ -72,16 +68,16 @@ st.markdown(
         padding: 12px 14px;
         border-radius: 8px;
         margin-bottom: 12px;
-        line-height: 1.6
+        line-height: 1.6;
     }
 
     .card h4 {
         color: #48C9B0;
-        margin: 0 0 10px 0
+        margin: 0 0 10px 0;
     }
     </style>
     """,
-    unsafe_allow_html=True
+    unsafe_allow_html=True,
 )
 
 
@@ -89,28 +85,44 @@ def get_headers() -> dict[str, str]:
     """
     Construit les en-têtes HTTP utilisés pour les appels à l'API.
 
-    Cette fonction ajoute la clé d'authentification personnalisée si
-    elle est définie dans la configuration du projet.
-
     Returns
     -------
     dict[str, str]
         Dictionnaire contenant les en-têtes HTTP à envoyer.
     """
     headers = {}
-
     if API_KEY:
         headers["x-api-key"] = API_KEY
-
     return headers
+
+
+def get_error_message(response: requests.Response) -> str:
+    """
+    Extrait un message d'erreur lisible depuis une réponse HTTP.
+
+    Parameters
+    ----------
+    response : requests.Response
+        Réponse HTTP renvoyée par l'API.
+
+    Returns
+    -------
+    str
+        Message d'erreur lisible pour l'utilisateur.
+    """
+    try:
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload.get("detail", str(payload))
+    except Exception:
+        pass
+
+    return response.text or f"Erreur HTTP {response.status_code}"
 
 
 def call_health() -> requests.Response:
     """
     Interroge l'endpoint `/health` de l'API.
-
-    Cet endpoint permet de vérifier rapidement si l'API FastAPI
-    est accessible et opérationnelle.
 
     Returns
     -------
@@ -119,8 +131,7 @@ def call_health() -> requests.Response:
     """
     return requests.get(
         f"{API_URL}/health",
-        headers=get_headers(),
-        timeout=30
+        timeout=30,
     )
 
 
@@ -128,17 +139,12 @@ def call_rebuild(zone: str, scope: str) -> requests.Response:
     """
     Déclenche la reconstruction de la base documentaire.
 
-    L'appel à `/rebuild` permet de relancer la collecte et la
-    vectorisation des documents selon une zone géographique et un
-    périmètre donnés.
-
     Parameters
     ----------
     zone : str
-        Zone géographique ciblée, par exemple une ville ou une région.
+        Zone géographique ciblée.
     scope : str
-        Niveau géographique utilisé pour la recherche. Les valeurs
-        possibles sont par exemple `city`, `region` ou `country`.
+        Niveau géographique utilisé pour la recherche.
 
     Returns
     -------
@@ -149,16 +155,13 @@ def call_rebuild(zone: str, scope: str) -> requests.Response:
         f"{API_URL}/rebuild",
         json={"zone": zone, "scope": scope},
         headers=get_headers(),
-        timeout=180
+        timeout=180,
     )
 
 
 def call_ask(question: str) -> requests.Response:
     """
     Envoie une question utilisateur à l'endpoint `/ask`.
-
-    Cette fonction transmet la requête au système RAG, qui se charge
-    de récupérer les documents pertinents puis de générer une réponse.
 
     Parameters
     ----------
@@ -174,17 +177,13 @@ def call_ask(question: str) -> requests.Response:
         f"{API_URL}/ask",
         json={"question": question},
         headers=get_headers(),
-        timeout=180
+        timeout=180,
     )
 
 
 def format_date_range(first_date: str, last_date: str) -> str:
     """
     Formate une plage de dates pour l'affichage.
-
-    Si la date de début et la date de fin sont différentes, la fonction
-    retourne un intervalle. Sinon, elle retourne la seule date connue.
-    Si aucune date n'est disponible, une valeur par défaut est affichée.
 
     Parameters
     ----------
@@ -211,30 +210,23 @@ def render_answer(answer: str) -> None:
     """
     Affiche la réponse générée par le système RAG.
 
-    La réponse est présentée dans un encadré stylisé afin d'améliorer
-    la lisibilité dans l'interface.
-
     Parameters
     ----------
     answer : str
         Réponse textuelle produite par le système.
     """
     st.markdown("### Recommandation")
-
     formatted_answer = answer.replace("\n", "<br>")
 
     st.markdown(
         f'<div class="box">{formatted_answer}</div>',
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
 
 
 def render_documents(documents: list[dict]) -> None:
     """
     Affiche les documents récupérés sous forme de cartes.
-
-    Chaque document correspond à un événement culturel proposé comme
-    source ou recommandation par le moteur de recherche.
 
     Parameters
     ----------
@@ -269,11 +261,9 @@ def render_documents(documents: list[dict]) -> None:
                 <p><strong>Type :</strong> {event_type or "Non précisé"}</p>
             </div>
             """,
-            unsafe_allow_html=True
+            unsafe_allow_html=True,
         )
 
-        # Si une URL de détail est disponible, un bouton permet
-        # d'ouvrir directement la fiche de l'événement.
         if url:
             st.link_button(f"Voir la fiche de l’événement {i}", url)
 
@@ -281,9 +271,6 @@ def render_documents(documents: list[dict]) -> None:
 def render_history_item(item: dict, index: int) -> None:
     """
     Affiche un élément de l'historique local.
-
-    Chaque entrée de l'historique contient la question posée,
-    la réponse générée et éventuellement les documents utilisés.
 
     Parameters
     ----------
@@ -317,9 +304,6 @@ def render_metrics(answer: str, n_docs: int) -> None:
     """
     Affiche quelques indicateurs simples sur la réponse produite.
 
-    Les métriques présentées ici permettent de résumer rapidement
-    le volume de contenu généré et le nombre de documents mobilisés.
-
     Parameters
     ----------
     answer : str
@@ -336,28 +320,20 @@ def render_metrics(answer: str, n_docs: int) -> None:
         st.metric("Longueur de la réponse", len(answer))
 
 
-## Initialisation de l'état de session
-
-# Historique local des échanges affichés dans l'onglet principal.
 if "history" not in st.session_state:
     st.session_state.history = []
 
-# Dernier résultat récupéré depuis l'endpoint /health.
 if "health_data" not in st.session_state:
     st.session_state.health_data = None
 
 
-# Avertissement si aucune clé API n'est définie.
 if not API_KEY:
     st.warning("API_KEY manquante")
 
 
-# En-tête principal de l'application
 st.title("Assistant culturel OpenAgenda")
 st.caption("Trouvez des événements culturels via langage naturel")
 
-
-# Barre latérale
 
 st.sidebar.header("Contrôles API")
 st.sidebar.write(f"**URL API :** `{API_URL}`")
@@ -370,29 +346,39 @@ if st.sidebar.button("Vérifier /health", use_container_width=True):
             st.session_state.health_data = response.json()
             st.sidebar.success("API OK")
         else:
-            st.sidebar.error(f"Erreur {response.status_code}")
+            st.sidebar.error(get_error_message(response))
 
     except Exception as exc:
         st.sidebar.error(str(exc))
 
 
-# Création des deux onglets principaux.
 tab_chat, tab_admin = st.tabs(["Chat", "Admin"])
 
 
-# Onglet Chat
 with tab_chat:
     st.subheader("Question")
 
-    # Zone de saisie pour la requête utilisateur.
     question = st.text_area(
         "Votre question",
         value="Je cherche une exposition à Montpellier",
-        height=120
+        height=120,
     )
 
-    # Déclenchement de la recherche et de la génération.
-    if st.button("Rechercher", type="primary", use_container_width=True):
+    col_action, col_clear = st.columns([3, 1])
+
+    with col_action:
+        search_clicked = st.button(
+            "Rechercher",
+            type="primary",
+            use_container_width=True,
+        )
+
+    with col_clear:
+        if st.button("Vider l'historique", use_container_width=True):
+            st.session_state.history = []
+            st.success("Historique vidé.")
+
+    if search_clicked:
         if question.strip():
             try:
                 with st.spinner("Recherche..."):
@@ -400,55 +386,54 @@ with tab_chat:
 
                 if response.ok:
                     data = response.json()
-
-                    # Sauvegarde de la réponse dans l'historique de session.
                     st.session_state.history.insert(0, data)
 
-                    # Affichage de la réponse, des métriques et des documents.
                     render_answer(data["answer"])
                     render_metrics(data["answer"], data["n_docs"])
                     render_documents(data["documents"])
 
                 else:
-                    st.error(response.text)
+                    st.error(get_error_message(response))
 
             except Exception as exc:
                 st.error(str(exc))
+        else:
+            st.warning("Veuillez saisir une question.")
 
     st.divider()
     st.subheader("Historique")
 
-    # Affichage des cinq derniers échanges de la session.
     for i, item in enumerate(st.session_state.history[:5], 1):
         render_history_item(item, i)
 
 
-# Onglet Admin
 with tab_admin:
     col1, col2 = st.columns(2)
 
     with col1:
         st.subheader("Reconstruction documentaire")
 
-        # Paramètres utilisés pour reconstruire la base vectorielle.
         zone = st.text_input("Zone", DEFAULT_ZONE)
+        allowed_scopes = ["city", "region", "country"]
         scope = st.selectbox(
             "Scope",
-            ["city", "region", "country"],
-            index=["city", "region", "country"].index(DEFAULT_SCOPE)
-            if DEFAULT_SCOPE in ["city", "region", "country"]
-            else 0
+            allowed_scopes,
+            index=allowed_scopes.index(DEFAULT_SCOPE)
+            if DEFAULT_SCOPE in allowed_scopes
+            else 0,
         )
 
-        if st.button("Rebuild"):
+        if st.button("Rebuild", use_container_width=True):
             try:
                 with st.spinner("Rebuild..."):
                     response = call_rebuild(zone, scope)
 
                 if response.ok:
-                    st.success("OK")
+                    data = response.json()
+                    st.success(data.get("message", "Reconstruction terminée."))
+                    st.info(f"Documents indexés : {data.get('n_docs_indexed', 0)}")
                 else:
-                    st.error(response.text)
+                    st.error(get_error_message(response))
 
             except Exception as exc:
                 st.error(str(exc))
@@ -456,7 +441,7 @@ with tab_admin:
     with col2:
         st.subheader("État de l'API")
 
-        if st.button("Refresh health"):
+        if st.button("Refresh health", use_container_width=True):
             try:
                 response = call_health()
 
@@ -464,11 +449,12 @@ with tab_admin:
                     st.session_state.health_data = response.json()
                     st.success("API OK")
                 else:
-                    st.error("Erreur API")
+                    st.error(get_error_message(response))
 
             except Exception as exc:
                 st.error(str(exc))
 
-        # Affichage du dernier état récupéré si disponible.
         if st.session_state.health_data:
             st.json(st.session_state.health_data)
+        else:
+            st.caption("Aucun état API récupéré pour le moment.")

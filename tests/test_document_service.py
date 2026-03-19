@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import requests
 from langchain_core.documents import Document
 
 from app.document_service import (
@@ -33,7 +34,7 @@ class FakeResponse:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise Exception(f"HTTP error {self.status_code}")
+            raise requests.HTTPError(f"HTTP error {self.status_code}")
 
     def json(self):
         return self._payload
@@ -287,6 +288,21 @@ def test_parse_date_filters_range():
     assert end == "2025-09-21"
 
 
+def test_parse_date_filters_numeric():
+    start, end = parse_date_filters("Quels événements le 20/09/2025 ?")
+
+    assert start == "2025-09-20"
+    assert end == "2025-09-20"
+
+
+def test_parse_date_filters_today():
+    start, end = parse_date_filters("Quels événements aujourd'hui ?")
+
+    assert start is not None
+    assert end is not None
+    assert start == end
+
+
 def test_extract_filters_from_question(sample_documents):
     filters = extract_filters_from_question(
         question="Y a-t-il une exposition au Musée Fabre à Montpellier en septembre 2025 ?",
@@ -298,6 +314,15 @@ def test_extract_filters_from_question(sample_documents):
     assert "exposition" in filters["event_types"]
     assert filters["date_start"] == "2025-09-01"
     assert filters["date_end"] == "2025-09-30"
+
+
+def test_extract_filters_from_question_fuzzy_city(sample_documents):
+    filters = extract_filters_from_question(
+        question="Je cherche une exposition à Montpelier",
+        documents=sample_documents,
+    )
+
+    assert "montpellier" in filters["cities"]
 
 
 def test_doc_matches_filters_true(sample_documents):
@@ -324,6 +349,19 @@ def test_doc_matches_filters_false_city(sample_documents):
     }
 
     assert doc_matches_filters(sample_documents[1], filters) is False
+
+
+def test_doc_matches_filters_false_date(sample_documents):
+    filters = {
+        "cities": [],
+        "locations": [],
+        "event_types": [],
+        "date_start": "2025-10-01",
+        "date_end": "2025-10-31",
+        "keywords": [],
+    }
+
+    assert doc_matches_filters(sample_documents[0], filters) is False
 
 
 def test_score_document_prefers_matching_doc(sample_documents):
@@ -387,6 +425,18 @@ def test_search_agendas_for_zone_invalid_payload(monkeypatch):
         search_agendas_for_zone("Montpellier")
 
 
+def test_search_agendas_for_zone_request_error(monkeypatch):
+    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
+
+    def fake_get(*args, **kwargs):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr("app.document_service.requests.get", fake_get)
+
+    with pytest.raises(RuntimeError, match="Erreur réseau lors de la recherche des agendas"):
+        search_agendas_for_zone("Montpellier")
+
+
 def test_fetch_openagenda_events_ok(monkeypatch):
     monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
 
@@ -441,6 +491,18 @@ def test_fetch_openagenda_events_invalid_payload(monkeypatch):
         fetch_openagenda_events("123", "Montpellier")
 
 
+def test_fetch_openagenda_events_request_error(monkeypatch):
+    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
+
+    def fake_get(*args, **kwargs):
+        raise requests.RequestException("boom")
+
+    monkeypatch.setattr("app.document_service.requests.get", fake_get)
+
+    with pytest.raises(RuntimeError, match="Erreur réseau lors de la récupération des événements"):
+        fetch_openagenda_events("123", "Montpellier")
+
+
 def test_fetch_and_save_events_returns_dataframe(monkeypatch, tmp_path: Path):
     json_path = tmp_path / "raw" / "events.json"
     csv_path = tmp_path / "processed" / "events.csv"
@@ -484,6 +546,23 @@ def test_fetch_and_save_events_returns_dataframe(monkeypatch, tmp_path: Path):
     assert "text_for_embedding" in df.columns
     assert json_path.exists()
     assert csv_path.exists()
+
+
+def test_fetch_and_save_events_skips_runtime_error_and_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        "app.document_service.search_agendas_for_zone",
+        lambda zone: [{"uid": "111"}],
+    )
+
+    def fake_fetch(*args, **kwargs):
+        raise RuntimeError("erreur réseau")
+
+    monkeypatch.setattr("app.document_service.fetch_openagenda_events", fake_fetch)
+
+    df = fetch_and_save_events(zone="Montpellier", scope="city")
+
+    assert isinstance(df, pd.DataFrame)
+    assert df.empty
 
 
 def test_fetch_and_save_events_no_agendas(monkeypatch):
@@ -580,6 +659,32 @@ def test_load_documents_from_csv(tmp_path: Path):
 
     assert len(docs) == 1
     assert docs[0].metadata["title"] == "Expo CSV"
+
+
+def test_load_documents_filters_poor_events_from_json(tmp_path: Path):
+    json_path = tmp_path / "events.json"
+    events = [
+        {
+            "uid": "1",
+            "agenda": {"uid": "42"},
+            "title": {"fr": ""},
+            "description": {"fr": ""},
+            "canonicalUrl": "http://json.com",
+            "firstDate": "2026-03-01",
+            "lastDate": "2026-03-10",
+            "eventType": "Exposition",
+            "location": {
+                "name": "",
+                "city": "Montpellier",
+                "region": "Occitanie",
+            },
+        }
+    ]
+    save_events_to_json(events, json_path)
+
+    docs = load_documents(source="json", json_path=json_path)
+
+    assert docs == []
 
 
 def test_load_documents_invalid_source():

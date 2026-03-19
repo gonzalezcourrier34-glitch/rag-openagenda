@@ -31,6 +31,17 @@ def test_load_memory_invalid_json_returns_empty_list(tmp_path: Path):
     assert result == []
 
 
+def test_load_memory_valid_json_but_not_list_returns_empty_list(tmp_path: Path):
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text('{"question": "Q"}', encoding="utf-8")
+
+    memory = MemoryService(memory_file=str(memory_file))
+
+    result = memory.load_memory()
+
+    assert result == []
+
+
 def test_save_and_load_memory(tmp_path: Path):
     memory_file = tmp_path / "memory.json"
     memory = MemoryService(memory_file=str(memory_file))
@@ -233,6 +244,12 @@ def test_extract_choice_number_le():
     assert memory.extract_choice_number("le 1") == 1
 
 
+def test_extract_choice_number_does_not_confuse_date():
+    memory = MemoryService()
+
+    assert memory.extract_choice_number("le 3 mars") is None
+
+
 def test_extract_choice_number_not_found():
     memory = MemoryService()
 
@@ -249,6 +266,20 @@ def test_build_choice_answer_no_choice_number(tmp_path: Path):
 
 def test_build_choice_answer_no_last_entry(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
+
+    result = memory.build_choice_answer("choix 1")
+
+    assert result is None
+
+
+def test_build_choice_answer_no_documents_in_last_entry(tmp_path: Path):
+    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
+
+    memory.add_entry(
+        question="Question",
+        answer="Réponse",
+        documents=[],
+    )
 
     result = memory.build_choice_answer("choix 1")
 

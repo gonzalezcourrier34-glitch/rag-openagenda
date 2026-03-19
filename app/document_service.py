@@ -18,10 +18,12 @@ des résultats renvoyés au moment de la recherche.
 """
 from __future__ import annotations
 
+import calendar
 import json
 import re
 import unicodedata
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +33,6 @@ from langchain_core.documents import Document
 
 from app.config import OPENAGENDA_API_KEY
 
-
-# Fenêtre temporelle utilisée pour récupérer les événements :
-# de l'année précédente jusqu'à aujourd'hui.
-today = date.today()
-date_from = (today - timedelta(days=365)).isoformat()
-date_to = today.isoformat()
 
 # Racine du projet
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -49,6 +45,39 @@ PROCESSED_DIR = DATA_DIR / "processed"
 # Fichiers par défaut
 DEFAULT_JSON_PATH = RAW_DIR / "openagenda_events.json"
 DEFAULT_CSV_PATH = PROCESSED_DIR / "openagenda_events.csv"
+
+# Poids utilisés dans le scoring métier des documents
+SCORE_WEIGHTS = {
+    "city_match": 3.0,
+    "location_match": 3.0,
+    "event_type_match": 2.0,
+    "keyword_match": 1.0,
+    "date_filter_bonus": 1.0,
+    "title_overlap_bonus": 0.5,
+}
+
+
+def get_default_date_window(days_back: int = 365) -> tuple[str, str]:
+    """
+    Calcule la fenêtre temporelle par défaut utilisée pour récupérer
+    les événements OpenAgenda.
+
+    La période couvre par défaut l'année précédente jusqu'à aujourd'hui.
+
+    Parameters
+    ----------
+    days_back : int, default=365
+        Nombre de jours à remonter dans le passé.
+
+    Returns
+    -------
+    tuple[str, str]
+        Couple `(date_from, date_to)` au format ISO YYYY-MM-DD.
+    """
+    today = date.today()
+    date_from = (today - timedelta(days=days_back)).isoformat()
+    date_to = today.isoformat()
+    return date_from, date_to
 
 
 def _safe(value: object) -> str:
@@ -70,6 +99,74 @@ def _safe(value: object) -> str:
         Chaîne vide si la valeur est nulle, sinon représentation texte.
     """
     return "" if value is None else str(value)
+
+
+def _clean_text_field(value: object) -> str:
+    """
+    Nettoie un champ texte simple sans casser la structure globale.
+
+    Parameters
+    ----------
+    value : object
+        Valeur à nettoyer.
+
+    Returns
+    -------
+    str
+        Texte nettoyé.
+    """
+    text = _safe(value).replace("\r", " ").replace("\t", " ")
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _build_multiline_text(parts: list[tuple[str, str]]) -> str:
+    """
+    Construit un texte multiligne à partir d'une liste de couples
+    `(libellé, valeur)`.
+
+    Les lignes vides sont ignorées afin d'éviter les documents bruités.
+
+    Parameters
+    ----------
+    parts : list[tuple[str, str]]
+        Liste ordonnée des champs à intégrer.
+
+    Returns
+    -------
+    str
+        Texte consolidé prêt pour l'embedding.
+    """
+    lines = []
+    for label, value in parts:
+        cleaned_value = _clean_text_field(value)
+        if cleaned_value:
+            lines.append(f"{label} : {cleaned_value}")
+    return "\n".join(lines).strip()
+
+
+def _parse_iso_date(value: str) -> date | None:
+    """
+    Convertit une chaîne ISO YYYY-MM-DD en objet date.
+
+    Parameters
+    ----------
+    value : str
+        Date à convertir.
+
+    Returns
+    -------
+    date | None
+        Date convertie ou `None` si le format est invalide.
+    """
+    value = _safe(value).strip()
+    if not value:
+        return None
+
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def normalize_text(text: str) -> str:
@@ -208,30 +305,29 @@ def build_event_document(event: dict) -> Document:
         - des métadonnées descriptives
     """
     event_uid = _safe(event.get("event_uid"))
-    title = _safe(event.get("title"))
-    description = _safe(event.get("description"))
-    location_name = _safe(event.get("location_name"))
-    city = _safe(event.get("city"))
-    region = _safe(event.get("region"))
-    first_date = _safe(event.get("first_date"))
-    last_date = _safe(event.get("last_date"))
-    event_type = _safe(event.get("event_type"))
-    source_url = _safe(event.get("source_url"))
-    agenda_uid = _safe(event.get("agenda_uid"))
-    text_for_embedding = _safe(event.get("text_for_embedding"))
+    title = _clean_text_field(event.get("title"))
+    description = _clean_text_field(event.get("description"))
+    location_name = _clean_text_field(event.get("location_name"))
+    city = _clean_text_field(event.get("city"))
+    region = _clean_text_field(event.get("region"))
+    first_date = _clean_text_field(event.get("first_date"))
+    last_date = _clean_text_field(event.get("last_date"))
+    event_type = _clean_text_field(event.get("event_type"))
+    source_url = _clean_text_field(event.get("source_url"))
+    agenda_uid = _clean_text_field(event.get("agenda_uid"))
+    text_for_embedding = _safe(event.get("text_for_embedding")).strip()
 
-    page_content = text_for_embedding if text_for_embedding else "\n".join(
-        part for part in [
-            f"Titre : {title}",
-            f"Description : {description}",
-            f"Lieu : {location_name}",
-            f"Ville : {city}",
-            f"Région : {region}",
-            f"Date de début : {first_date}",
-            f"Date de fin : {last_date}",
-            f"Type d'événement : {event_type}",
+    page_content = text_for_embedding if text_for_embedding else _build_multiline_text(
+        [
+            ("Titre", title),
+            ("Description", description),
+            ("Lieu", location_name),
+            ("Ville", city),
+            ("Région", region),
+            ("Date de début", first_date),
+            ("Date de fin", last_date),
+            ("Type d'événement", event_type),
         ]
-        if part and part.split(" : ", 1)[-1].strip()
     )
 
     metadata = {
@@ -283,7 +379,7 @@ def search_agendas_for_zone(
     ------
     ValueError
         Si la clé API OpenAgenda est absente ou si la réponse est inattendue.
-    requests.HTTPError
+    RuntimeError
         Si l'appel HTTP échoue.
     """
     if not OPENAGENDA_API_KEY:
@@ -299,9 +395,14 @@ def search_agendas_for_zone(
     if official:
         params["official"] = 1
 
-    response = requests.get(url, headers=headers, params=params, timeout=30)
-    response.raise_for_status()
-    payload = response.json()
+    try:
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise RuntimeError(
+            f"Erreur réseau lors de la recherche des agendas pour la zone '{zone}'."
+        ) from exc
 
     if "agendas" not in payload:
         raise ValueError(f"Réponse inattendue : {list(payload.keys())}")
@@ -314,7 +415,8 @@ def fetch_openagenda_events(
     zone: str,
     scope: str = "city",
     limit: int = 300,
-    max_pages: int = 50
+    max_pages: int = 50,
+    days_back: int = 365,
 ) -> list[dict]:
     """
     Récupère les événements d'un agenda OpenAgenda avec pagination.
@@ -335,6 +437,8 @@ def fetch_openagenda_events(
         Nombre maximum d'événements récupérés par requête.
     max_pages : int, default=50
         Nombre maximum de pages à interroger.
+    days_back : int, default=365
+        Fenêtre temporelle glissante en jours.
 
     Returns
     -------
@@ -345,13 +449,15 @@ def fetch_openagenda_events(
     ------
     ValueError
         Si la clé API est absente ou si la réponse API est inattendue.
-    requests.HTTPError
+    RuntimeError
         Si l'appel HTTP échoue.
     """
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante dans le fichier .env")
 
-    all_events = []
+    date_from, date_to = get_default_date_window(days_back=days_back)
+
+    all_events: list[dict] = []
     offset = 0
 
     for _ in range(max_pages):
@@ -369,9 +475,15 @@ def fetch_openagenda_events(
             "oaq[order]": "latest",
         }
 
-        response = requests.get(url, params=params, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
+        try:
+            response = requests.get(url, params=params, timeout=30)
+            response.raise_for_status()
+            payload = response.json()
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f"Erreur réseau lors de la récupération des événements "
+                f"de l'agenda '{agenda_uid}' pour la zone '{zone}'."
+            ) from exc
 
         if "events" not in payload:
             raise ValueError(f"Réponse inattendue de l'API : {list(payload.keys())}")
@@ -392,6 +504,28 @@ def fetch_openagenda_events(
     return all_events
 
 
+def _is_event_content_rich_enough(event: dict[str, Any]) -> bool:
+    """
+    Vérifie qu'un événement contient un minimum d'information utile
+    pour être conservé dans le corpus.
+
+    Parameters
+    ----------
+    event : dict[str, Any]
+        Événement OpenAgenda brut ou normalisé.
+
+    Returns
+    -------
+    bool
+        `True` si l'événement est suffisamment informatif.
+    """
+    title = _clean_text_field(event.get("title") or event.get("title.fr"))
+    description = _clean_text_field(event.get("description") or event.get("description.fr"))
+    location_name = _clean_text_field(event.get("location_name") or event.get("location.name"))
+
+    return any([title, description, location_name])
+
+
 def fetch_and_save_events(
     zone: str = "Montpellier",
     scope: str = "city",
@@ -400,6 +534,10 @@ def fetch_and_save_events(
 ) -> pd.DataFrame:
     """
     Récupère les événements OpenAgenda, puis les sauvegarde en JSON et CSV.
+
+    La recherche des agendas s'effectue à partir de la zone fournie.
+    Le paramètre `scope` est utilisé ensuite au moment de récupérer
+    les événements de chaque agenda.
 
     Parameters
     ----------
@@ -422,15 +560,26 @@ def fetch_and_save_events(
     if not agendas:
         return pd.DataFrame()
 
-    all_events = []
+    all_events: list[dict] = []
 
     for agenda in agendas:
-        events = fetch_openagenda_events(
-            agenda_uid=str(agenda["uid"]),
-            zone=zone,
-            scope=scope,
-        )
-        all_events.extend(events)
+        agenda_uid = _safe(agenda.get("uid"))
+        if not agenda_uid:
+            continue
+
+        try:
+            events = fetch_openagenda_events(
+                agenda_uid=agenda_uid,
+                zone=zone,
+                scope=scope,
+            )
+            valid_events = [event for event in events if _is_event_content_rich_enough(event)]
+            all_events.extend(valid_events)
+        except RuntimeError:
+            continue
+
+    if not all_events:
+        return pd.DataFrame()
 
     save_events_to_json(all_events, json_path)
 
@@ -514,10 +663,7 @@ def normalize_events(events: list[dict]) -> pd.DataFrame:
             df[col] = ""
 
     for col in schema_cols:
-        df[col] = df[col].fillna("").astype(str).str.strip()
-
-    df["title"] = df["title"].str.replace(r"\s+", " ", regex=True).str.strip()
-    df["description"] = df["description"].str.replace(r"\s+", " ", regex=True).str.strip()
+        df[col] = df[col].fillna("").astype(str).map(_clean_text_field)
 
     return df[schema_cols].copy()
 
@@ -547,22 +693,36 @@ def build_indexable_text(df: pd.DataFrame) -> pd.DataFrame:
     """
     df = df.copy()
 
-    df["text_for_embedding"] = (
-        "Titre : " + df["title"].fillna("") + "\n"
-        + "Description : " + df["description"].fillna("") + "\n"
-        + "Lieu : " + df["location_name"].fillna("") + "\n"
-        + "Ville : " + df["city"].fillna("") + "\n"
-        + "Région : " + df["region"].fillna("") + "\n"
-        + "Date de début : " + df["first_date"].fillna("").astype(str) + "\n"
-        + "Date de fin : " + df["last_date"].fillna("").astype(str) + "\n"
-        + "Type d'événement : " + df["event_type"].fillna("")
-    )
+    text_columns = [
+        "title",
+        "description",
+        "location_name",
+        "city",
+        "region",
+        "first_date",
+        "last_date",
+        "event_type",
+    ]
 
-    df["text_for_embedding"] = (
-        df["text_for_embedding"]
-        .str.replace(r"\s+", " ", regex=True)
-        .str.replace(r"\n ", "\n", regex=False)
-        .str.strip()
+    for col in text_columns:
+        if col not in df.columns:
+            df[col] = ""
+        df[col] = df[col].fillna("").map(_clean_text_field)
+
+    df["text_for_embedding"] = df.apply(
+        lambda row: _build_multiline_text(
+            [
+                ("Titre", row["title"]),
+                ("Description", row["description"]),
+                ("Lieu", row["location_name"]),
+                ("Ville", row["city"]),
+                ("Région", row["region"]),
+                ("Date de début", row["first_date"]),
+                ("Date de fin", row["last_date"]),
+                ("Type d'événement", row["event_type"]),
+            ]
+        ),
+        axis=1,
     )
 
     return df
@@ -613,6 +773,52 @@ def get_known_metadata_values(documents: list[Document]) -> dict[str, set[str]]:
     return values
 
 
+def _resolve_relative_date_filters(question: str) -> tuple[str | None, str | None]:
+    """
+    Interprète quelques expressions temporelles relatives fréquentes.
+
+    Parameters
+    ----------
+    question : str
+        Question utilisateur normalisée.
+
+    Returns
+    -------
+    tuple[str | None, str | None]
+        Couple `(date_start, date_end)` au format ISO.
+    """
+    q = normalize_text(question)
+    today = date.today()
+
+    if "aujourd hui" in q or "aujourdhui" in q:
+        iso = today.isoformat()
+        return iso, iso
+
+    if "demain" in q:
+        d = (today + timedelta(days=1)).isoformat()
+        return d, d
+
+    if "ce soir" in q:
+        iso = today.isoformat()
+        return iso, iso
+
+    if "ce week end" in q or "weekend" in q or "week end" in q:
+        days_until_saturday = (5 - today.weekday()) % 7
+        saturday = today + timedelta(days=days_until_saturday)
+        sunday = saturday + timedelta(days=1)
+        return saturday.isoformat(), sunday.isoformat()
+
+    if "semaine prochaine" in q:
+        days_until_next_monday = (7 - today.weekday()) % 7
+        if days_until_next_monday == 0:
+            days_until_next_monday = 7
+        monday = today + timedelta(days=days_until_next_monday)
+        sunday = monday + timedelta(days=6)
+        return monday.isoformat(), sunday.isoformat()
+
+    return None, None
+
+
 def parse_date_filters(question: str) -> tuple[str | None, str | None]:
     """
     Extrait une plage de dates simple à partir d'une question.
@@ -621,6 +827,8 @@ def parse_date_filters(question: str) -> tuple[str | None, str | None]:
     - un mois et une année, par exemple "septembre 2025"
     - une date précise, par exemple "20 septembre 2025"
     - un intervalle simple, par exemple "20 au 21 septembre 2025"
+    - un format numérique simple, par exemple "20/09/2025"
+    - quelques expressions relatives fréquentes
 
     Parameters
     ----------
@@ -635,19 +843,23 @@ def parse_date_filters(question: str) -> tuple[str | None, str | None]:
     """
     q = normalize_text(question)
 
+    relative_start, relative_end = _resolve_relative_date_filters(q)
+    if relative_start or relative_end:
+        return relative_start, relative_end
+
     month_map = {
-        "janvier": "01",
-        "fevrier": "02",
-        "mars": "03",
-        "avril": "04",
-        "mai": "05",
-        "juin": "06",
-        "juillet": "07",
-        "aout": "08",
-        "septembre": "09",
-        "octobre": "10",
-        "novembre": "11",
-        "decembre": "12",
+        "janvier": 1,
+        "fevrier": 2,
+        "mars": 3,
+        "avril": 4,
+        "mai": 5,
+        "juin": 6,
+        "juillet": 7,
+        "aout": 8,
+        "septembre": 9,
+        "octobre": 10,
+        "novembre": 11,
+        "decembre": 12,
     }
 
     range_pattern = (
@@ -660,9 +872,16 @@ def parse_date_filters(question: str) -> tuple[str | None, str | None]:
         day1, day2, month_name, year = match.groups()
         month_num = month_map[month_name]
         return (
-            f"{year}-{month_num}-{int(day1):02d}",
-            f"{year}-{month_num}-{int(day2):02d}",
+            date(int(year), month_num, int(day1)).isoformat(),
+            date(int(year), month_num, int(day2)).isoformat(),
         )
+
+    numeric_exact_pattern = r"\b(\d{1,2})/(\d{1,2})/(\d{4})\b"
+    match = re.search(numeric_exact_pattern, q)
+    if match:
+        day, month_num, year = match.groups()
+        exact_date = date(int(year), int(month_num), int(day)).isoformat()
+        return exact_date, exact_date
 
     exact_pattern = (
         r"(\d{1,2})\s+"
@@ -673,27 +892,71 @@ def parse_date_filters(question: str) -> tuple[str | None, str | None]:
     if match:
         day, month_name, year = match.groups()
         month_num = month_map[month_name]
-        exact_date = f"{year}-{month_num}-{int(day):02d}"
+        exact_date = date(int(year), month_num, int(day)).isoformat()
         return exact_date, exact_date
 
     for month_name, month_num in month_map.items():
         pattern = rf"{month_name}\s+(\d{{4}})"
         match = re.search(pattern, q)
         if match:
-            year = match.group(1)
-
-            if month_num == "12":
-                date_end = f"{year}-12-31"
-            elif month_num in {"01", "03", "05", "07", "08", "10"}:
-                date_end = f"{year}-{month_num}-31"
-            elif month_num in {"04", "06", "09", "11"}:
-                date_end = f"{year}-{month_num}-30"
-            else:
-                date_end = f"{year}-{month_num}-28"
-
-            return f"{year}-{month_num}-01", date_end
+            year = int(match.group(1))
+            _, last_day = calendar.monthrange(year, month_num)
+            return (
+                date(year, month_num, 1).isoformat(),
+                date(year, month_num, last_day).isoformat(),
+            )
 
     return None, None
+
+
+def _match_known_values(
+    question: str,
+    known_values: set[str],
+    min_similarity: float = 0.88,
+) -> list[str]:
+    """
+    Tente d'associer des valeurs connues du corpus à la question utilisateur.
+
+    La détection combine :
+    - recherche par sous-chaîne
+    - comparaison approximative légère sur les segments de texte
+
+    Parameters
+    ----------
+    question : str
+        Question normalisée.
+    known_values : set[str]
+        Valeurs connues du corpus.
+    min_similarity : float, default=0.88
+        Seuil minimum de similarité pour retenir une correspondance.
+
+    Returns
+    -------
+    list[str]
+        Liste des valeurs détectées dans la question.
+    """
+    matches = set()
+
+    for value in known_values:
+        if not value:
+            continue
+
+        if value in question:
+            matches.add(value)
+            continue
+
+        question_tokens = question.split()
+        value_tokens = value.split()
+        window_size = max(1, len(value_tokens))
+
+        for idx in range(len(question_tokens) - window_size + 1):
+            candidate = " ".join(question_tokens[idx: idx + window_size])
+            similarity = SequenceMatcher(None, candidate, value).ratio()
+            if similarity >= min_similarity:
+                matches.add(value)
+                break
+
+    return sorted(matches)
 
 
 def extract_filters_from_question(
@@ -713,6 +976,7 @@ def extract_filters_from_question(
     L'extraction s'appuie à la fois sur :
     - les métadonnées connues du corpus
     - des règles simples de normalisation et de détection
+    - une détection approximative légère pour tolérer certaines variantes
 
     Parameters
     ----------
@@ -731,25 +995,13 @@ def extract_filters_from_question(
     date_start, date_end = parse_date_filters(q)
 
     filters = {
-        "cities": [],
-        "locations": [],
-        "event_types": [],
+        "cities": _match_known_values(q, known["cities"]),
+        "locations": _match_known_values(q, known["locations"]),
+        "event_types": _match_known_values(q, known["event_types"]),
         "date_start": date_start,
         "date_end": date_end,
         "keywords": [],
     }
-
-    for city in known["cities"]:
-        if city and city in q:
-            filters["cities"].append(city)
-
-    for location in known["locations"]:
-        if location and location in q:
-            filters["locations"].append(location)
-
-    for event_type in known["event_types"]:
-        if event_type and event_type in q:
-            filters["event_types"].append(event_type)
 
     stopwords = {
         "quel", "quels", "quelle", "quelles",
@@ -759,7 +1011,8 @@ def extract_filters_from_question(
         "proposes", "propose", "culturels", "culturel",
         "septembre", "octobre", "novembre", "decembre",
         "janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout",
-        "week", "end", "weekend",
+        "week", "end", "weekend", "soir", "demain", "aujourd", "hui",
+        "semaine", "prochaine", "cette", "ce",
     }
 
     tokens = re.findall(r"\b[a-z]{3,}\b", q)
@@ -803,8 +1056,9 @@ def doc_matches_filters(doc: Document, filters: dict[str, Any]) -> bool:
     city = normalize_text(md.get("city", ""))
     location_name = normalize_text(md.get("location_name", ""))
     event_type = normalize_text(md.get("event_type", ""))
-    first_date = _safe(md.get("first_date", "")).strip()
-    last_date = _safe(md.get("last_date", "")).strip()
+
+    first_date_obj = _parse_iso_date(_safe(md.get("first_date", "")).strip())
+    last_date_obj = _parse_iso_date(_safe(md.get("last_date", "")).strip())
 
     if filters["cities"] and city not in filters["cities"]:
         return False
@@ -817,13 +1071,13 @@ def doc_matches_filters(doc: Document, filters: dict[str, Any]) -> bool:
         if not any(evt in event_type for evt in filters["event_types"]):
             return False
 
-    date_start = filters.get("date_start")
-    date_end = filters.get("date_end")
+    date_start = _parse_iso_date(filters.get("date_start"))
+    date_end = _parse_iso_date(filters.get("date_end"))
 
-    if date_start and last_date and last_date < date_start:
+    if date_start and last_date_obj and last_date_obj < date_start:
         return False
 
-    if date_end and first_date and first_date > date_end:
+    if date_end and first_date_obj and first_date_obj > date_end:
         return False
 
     return True
@@ -839,6 +1093,11 @@ def score_document(question: str, doc: Document, filters: dict[str, Any]) -> flo
     - correspondance de type
     - présence de mots-clés dans le contenu ou les métadonnées
     - bonus léger si une contrainte temporelle est détectée
+    - léger bonus si le titre recoupe la formulation de la question
+
+    Le score reste volontairement heuristique et interprétable afin
+    de pouvoir être expliqué facilement lors d'une soutenance ou
+    ajusté rapidement selon les résultats observés.
 
     Parameters
     ----------
@@ -859,6 +1118,8 @@ def score_document(question: str, doc: Document, filters: dict[str, Any]) -> flo
     city = normalize_text(md.get("city", ""))
     location_name = normalize_text(md.get("location_name", ""))
     event_type = normalize_text(md.get("event_type", ""))
+    title = normalize_text(md.get("title", ""))
+
     full_text = normalize_text(
         f"{doc.page_content} "
         f"{md.get('title', '')} "
@@ -870,27 +1131,110 @@ def score_document(question: str, doc: Document, filters: dict[str, Any]) -> flo
     score = 0.0
 
     if filters["cities"] and city in filters["cities"]:
-        score += 3.0
+        score += SCORE_WEIGHTS["city_match"]
 
     if filters["locations"] and any(loc in location_name for loc in filters["locations"]):
-        score += 3.0
+        score += SCORE_WEIGHTS["location_match"]
 
     if filters["event_types"] and any(evt in event_type for evt in filters["event_types"]):
-        score += 2.0
+        score += SCORE_WEIGHTS["event_type_match"]
 
-    for keyword in filters["keywords"]:
-        if keyword in full_text:
-            score += 1.0
+    keyword_hits = sum(1 for keyword in filters["keywords"] if keyword in full_text)
+    score += keyword_hits * SCORE_WEIGHTS["keyword_match"]
 
     if filters.get("date_start") or filters.get("date_end"):
-        score += 1.0
+        score += SCORE_WEIGHTS["date_filter_bonus"]
 
     normalized_question = normalize_text(question)
-    title = normalize_text(md.get("title", ""))
-    if title and any(token in title for token in normalized_question.split()):
-        score += 0.5
+    question_tokens = set(normalized_question.split())
+    title_tokens = set(title.split())
+
+    if question_tokens & title_tokens:
+        score += SCORE_WEIGHTS["title_overlap_bonus"]
 
     return score
+
+
+def _load_events_dataframe_from_api(
+    zone: str,
+    scope: str,
+    json_path: str | Path,
+    csv_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Charge les événements depuis l'API OpenAgenda puis retourne
+    le DataFrame normalisé.
+
+    Parameters
+    ----------
+    zone : str
+        Zone géographique ciblée.
+    scope : str
+        Portée géographique utilisée pour filtrer les événements.
+    json_path : str | Path
+        Chemin du fichier JSON local.
+    csv_path : str | Path
+        Chemin du fichier CSV local.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame normalisé des événements.
+    """
+    return fetch_and_save_events(
+        zone=zone,
+        scope=scope,
+        json_path=json_path,
+        csv_path=csv_path,
+    )
+
+
+def _load_events_dataframe_from_json(
+    json_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Charge les événements depuis un fichier JSON local puis les normalise.
+
+    Parameters
+    ----------
+    json_path : str | Path
+        Chemin du fichier JSON local.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame normalisé enrichi pour l'embedding.
+    """
+    events = load_events_from_json(json_path)
+    filtered_events = [event for event in events if _is_event_content_rich_enough(event)]
+    df_events = normalize_events(filtered_events)
+    return build_indexable_text(df_events)
+
+
+def _load_events_dataframe_from_csv(
+    csv_path: str | Path,
+) -> pd.DataFrame:
+    """
+    Charge les événements depuis un fichier CSV local.
+
+    Si la colonne `text_for_embedding` est absente, elle est reconstruite.
+
+    Parameters
+    ----------
+    csv_path : str | Path
+        Chemin du fichier CSV local.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame prêt à être converti en documents.
+    """
+    df_events = load_events_from_csv(csv_path)
+
+    if "text_for_embedding" not in df_events.columns:
+        df_events = build_indexable_text(df_events)
+
+    return df_events
 
 
 def load_documents(
@@ -925,24 +1269,16 @@ def load_documents(
         Liste des documents LangChain prêts à être indexés.
     """
     if source == "api":
-        df_events = fetch_and_save_events(
+        df_events = _load_events_dataframe_from_api(
             zone=zone,
             scope=scope,
             json_path=json_path,
             csv_path=csv_path,
         )
-
     elif source == "json":
-        events = load_events_from_json(json_path)
-        df_events = normalize_events(events)
-        df_events = build_indexable_text(df_events)
-
+        df_events = _load_events_dataframe_from_json(json_path=json_path)
     elif source == "csv":
-        df_events = load_events_from_csv(csv_path)
-
-        if "text_for_embedding" not in df_events.columns:
-            df_events = build_indexable_text(df_events)
-
+        df_events = _load_events_dataframe_from_csv(csv_path=csv_path)
     else:
         raise ValueError("source doit valoir 'api', 'json' ou 'csv'")
 
@@ -950,13 +1286,12 @@ def load_documents(
         return []
 
     if "event_uid" in df_events.columns:
-        df_events = df_events.drop_duplicates(
-            subset=["event_uid"]
-        ).reset_index(drop=True)
+        df_events = df_events.drop_duplicates(subset=["event_uid"]).reset_index(drop=True)
 
     documents = [
         build_event_document(row.to_dict())
         for _, row in df_events.iterrows()
+        if _is_event_content_rich_enough(row.to_dict())
     ]
 
     return documents

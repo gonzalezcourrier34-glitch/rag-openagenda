@@ -13,6 +13,8 @@ dans FAISS, puis génère une réponse à partir des documents retrouvés.
 
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
 
@@ -24,11 +26,10 @@ from app.schemas import (
     AskResponse,
     HealthResponse,
     RebuildRequest,
-    RebuildResponse
+    RebuildResponse,
 )
-
 from app.security import require_api_key
-from datetime import datetime
+
 
 app = FastAPI(
     title="OpenAgenda RAG API",
@@ -64,7 +65,7 @@ def health() -> HealthResponse:
     """
     return HealthResponse(
         status="ok",
-        index_loaded=rag_service.is_index_loaded()
+        index_loaded=rag_service.is_index_loaded(),
     )
 
 
@@ -72,7 +73,7 @@ def health() -> HealthResponse:
     "/ask",
     response_model=AskResponse,
     summary="Posez une question au chatbot RAG",
-    dependencies=[Depends(require_api_key)]
+    dependencies=[Depends(require_api_key)],
 )
 def ask(payload: AskRequest) -> AskResponse:
     """
@@ -104,8 +105,9 @@ def ask(payload: AskRequest) -> AskResponse:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur interne : {str(exc)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erreur interne du serveur.")
+
 
 @app.post(
     "/ask/debug",
@@ -117,13 +119,8 @@ def ask_debug(payload: AskRequest) -> dict:
     Exécute le pipeline RAG en mode debug avec accès complet aux contextes.
 
     Cet endpoint est destiné à l'analyse, au debugging et à l'évaluation
-    du système RAG (ex : Ragas). Contrairement à `/ask`, il expose
-    explicitement les documents récupérés ainsi que leur contenu brut.
-
-    Le traitement suit les étapes suivantes :
-    1. récupération des documents pertinents via le moteur de recherche vectoriel
-    2. génération de la réponse à partir des documents
-    3. retour de la réponse accompagnée des contextes et métadonnées
+    du système RAG. Contrairement à `/ask`, il expose explicitement
+    les documents récupérés ainsi que leur contenu brut.
 
     Parameters
     ----------
@@ -152,18 +149,14 @@ def ask_debug(payload: AskRequest) -> dict:
 
         if not question:
             raise ValueError("La question ne peut pas être vide.")
-        
-        #retrieval
-        docs = rag_service.retrieve(question)
 
-        #génération
+        docs = rag_service.retrieve(question)
         answer = rag_service.generate(
             question=question,
             docs=docs,
-            current_date=current_date
+            current_date=current_date,
         )
 
-        #construction de la réponse debug
         return {
             "question": question,
             "answer": answer,
@@ -177,11 +170,12 @@ def ask_debug(payload: AskRequest) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=f"Erreur interne (debug RAG) : {str(exc)}"
+            detail="Erreur interne du serveur.",
         )
+
 
 @app.post(
     "/rebuild",
@@ -213,7 +207,7 @@ def rebuild(payload: RebuildRequest) -> RebuildResponse:
         zone = payload.zone or DEFAULT_ZONE
         scope = payload.scope or DEFAULT_SCOPE
 
-        documents = load_documents(zone=zone, scope=scope)
+        documents = load_documents(zone=zone, scope=scope, source="api")
 
         if not documents:
             raise ValueError("Aucun document n'a été chargé.")
@@ -224,11 +218,11 @@ def rebuild(payload: RebuildRequest) -> RebuildResponse:
         return RebuildResponse(
             status="success",
             message="La base d'information a été reconstruite avec succès.",
-            n_docs_indexed=n_docs
+            n_docs_indexed=n_docs,
         )
 
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Erreur interne : {str(exc)}")
+    except Exception:
+        raise HTTPException(status_code=500, detail="Erreur interne du serveur.")

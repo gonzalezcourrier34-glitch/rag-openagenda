@@ -27,6 +27,10 @@ from pathlib import Path
 from typing import Any
 
 
+BASE_DIR = Path(__file__).resolve().parents[1]
+DEFAULT_MEMORY_FILE = BASE_DIR / "data" / "memory" / "rag_memory.json"
+
+
 class MemoryService:
     """
     Service de mémoire locale persistée pour le système RAG.
@@ -40,7 +44,7 @@ class MemoryService:
 
     Parameters
     ----------
-    memory_file : str, default="data/memory/rag_memory.json"
+    memory_file : str | Path, default=DEFAULT_MEMORY_FILE
         Chemin du fichier JSON utilisé pour persister la mémoire.
     max_entries : int, default=500
         Nombre maximum d'entrées conservées en mémoire.
@@ -48,7 +52,7 @@ class MemoryService:
 
     def __init__(
         self,
-        memory_file: str = "data/memory/rag_memory.json",
+        memory_file: str | Path = DEFAULT_MEMORY_FILE,
         max_entries: int = 500,
     ) -> None:
         self.memory_file = Path(memory_file)
@@ -99,7 +103,7 @@ class MemoryService:
 
             return data if isinstance(data, list) else []
 
-        except Exception:
+        except (json.JSONDecodeError, OSError):
             return []
 
     def save_memory(self, entries: list[dict[str, Any]]) -> None:
@@ -287,7 +291,7 @@ class MemoryService:
         patterns = [
             r"\b(?:choix|numero|numéro)\s+(\d+)\b",
             r"\b(?:je veux le|je prends le|je choisis le)\s+(\d+)\b",
-            r"\ble\s+(\d+)\b",
+            r"^(?:le)\s+(\d+)$",
         ]
 
         for pattern in patterns:

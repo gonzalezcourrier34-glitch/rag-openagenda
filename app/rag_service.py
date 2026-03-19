@@ -89,6 +89,11 @@ class RAGService:
         et reranking.
     """
 
+    FALLBACK_NO_RESULT_MESSAGE = (
+        "Je ne trouve pas d'événement correspondant, je suis un assistant "
+        "qui ne peut vous conseiller que des événements culturels."
+    )
+
     def __init__(
         self,
         documents: list[Document] | None = None,
@@ -128,23 +133,59 @@ Date actuelle : {current_date}
 
 Tu dois répondre uniquement à partir du CONTEXTE DOCUMENTAIRE fourni.
 
-Tu peux utiliser la MÉMOIRE seulement comme aide complémentaire si elle est pertinente,
+Tu peux utiliser la MÉMOIRE uniquement comme aide complémentaire si elle est pertinente,
 mais tu ne dois jamais inventer d'événement qui ne serait pas présent dans le contexte documentaire.
 
-Règles :
-- N'invente aucun événement
-- Utilise uniquement les événements présents dans le contexte
-- Respecte strictement les contraintes de la question comme la date,
-  la période, le lieu, la ville, la gratuité ou le type d'événement
-- Si une information demandée n'est pas explicitement présente dans le contexte,
-  ne pas l'inventer
-- Si plusieurs événements sont pertinents, présente-les séparément
-- Si aucune information n’est disponible, réponds exactement :
+---
+
+RÈGLES DE RAISONNEMENT :
+
+Avant de répondre, analyse chaque événement du contexte et vérifie sa cohérence avec la question.
+
+Prends en compte les contraintes suivantes si elles sont explicitement demandées :
+- ville
+- lieu précis
+- date ou période
+- type d'événement
+- mots-clés
+
+---
+
+VALIDATION DES ÉVÉNEMENTS :
+
+- Un événement est valide s'il respecte clairement les contraintes exprimées dans la question.
+- Si une contrainte importante n'est pas présente dans le contexte,
+  indique que cette information n'est pas confirmée.
+- Ne rejette pas automatiquement un événement pertinent à cause d'une information manquante non critique.
+
+- Pour une question large, tu peux proposer plusieurs événements pertinents.
+
+---
+
+CAS DE REFUS :
+
+Tu dois répondre EXACTEMENT :
+
 "Je ne trouve pas d'événement correspondant, je suis un assistant qui ne peut vous conseiller que des événements culturels."
 
-Format de réponse OBLIGATOIRE :
+UNIQUEMENT si :
+- aucun événement du contexte ne correspond à la demande
+- ou la demande est hors périmètre
+- ou les contraintes sont trop strictes et aucun événement ne les respecte
 
-Pour chaque événement trouvé, réponds sous cette forme :
+---
+
+INTERDICTIONS :
+
+- N'invente aucun événement
+- N'utilise pas de connaissances externes
+- Ne suppose jamais une information absente
+
+---
+
+FORMAT DE RÉPONSE OBLIGATOIRE :
+
+Pour chaque événement retenu :
 
 Titre : <titre>
 
@@ -185,6 +226,100 @@ Contexte documentaire :
             Date actuelle au format YYYY-MM-DD.
         """
         return datetime.today().strftime("%Y-%m-%d")
+
+    def _normalize_k(self, k: int | None) -> int:
+        """
+        Normalise le nombre de documents à retourner.
+
+        Parameters
+        ----------
+        k : int | None
+            Nombre demandé par l'appelant.
+
+        Returns
+        -------
+        int
+            Valeur finale strictement positive.
+        """
+        final_k = self.default_k if k is None else k
+        return max(1, final_k)
+
+    def _ensure_vectorstore_available(self) -> FAISS:
+        """
+        Garantit que le vectorstore est disponible en mémoire.
+
+        Returns
+        -------
+        FAISS
+            Index vectoriel prêt à être utilisé.
+
+        Raises
+        ------
+        RuntimeError
+            Si le vectorstore reste indisponible après initialisation.
+        """
+        self.ensure_index_ready()
+
+        if self.vectorstore is None:
+            raise RuntimeError(
+                "Le vectorstore n'est pas disponible après initialisation."
+            )
+
+        return self.vectorstore
+
+    def _build_ask_response(
+        self,
+        question: str,
+        answer: str,
+        documents: list[RetrievedDocument],
+    ) -> AskResponse:
+        """
+        Construit un objet de réponse API standardisé.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        answer : str
+            Réponse finale.
+        documents : list[RetrievedDocument]
+            Documents retournés.
+
+        Returns
+        -------
+        AskResponse
+            Réponse complète sérialisable.
+        """
+        return AskResponse(
+            question=question,
+            answer=answer,
+            n_docs=len(documents),
+            documents=documents,
+        )
+
+    def _save_interaction_in_memory(
+        self,
+        question: str,
+        answer: str,
+        documents: list[RetrievedDocument],
+    ) -> None:
+        """
+        Sauvegarde une interaction dans la mémoire locale.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        answer : str
+            Réponse produite.
+        documents : list[RetrievedDocument]
+            Documents associés à la réponse.
+        """
+        self.memory_service.add_entry(
+            question=question,
+            answer=answer,
+            documents=[doc.model_dump() for doc in documents],
+        )
 
     def set_documents(self, documents: list[Document]) -> None:
         """
@@ -321,16 +456,19 @@ Contexte documentaire :
         if not question or not question.strip():
             raise ValueError("La question ne peut pas être vide.")
 
-        self.ensure_index_ready()
-
-        final_k = self.default_k if k is None else k
+        final_k = self._normalize_k(k)
         initial_k = max(self.initial_fetch_k, final_k * 3)
 
+        vectorstore = self._ensure_vectorstore_available()
+
         # Première récupération large de documents candidats.
-        raw_docs = self.vectorstore.similarity_search(
+        raw_docs = vectorstore.similarity_search(
             question.strip(),
             k=initial_k,
         )
+
+        if not raw_docs:
+            return []
 
         # Extraction de filtres métier à partir de la question
         # et des métadonnées connues dans les documents candidats.
@@ -382,18 +520,21 @@ Contexte documentaire :
         for i, doc in enumerate(docs, start=1):
             md = doc.metadata or {}
 
-            block = f"""
-Événement {i}
-Titre : {md.get('title', '')}
-Lieu : {md.get('location_name', '')}
-Ville : {md.get('city', '')}
-Région : {md.get('region', '')}
-Date de début : {md.get('first_date', '')}
-Date de fin : {md.get('last_date', '')}
-Type : {md.get('event_type', '')}
-URL : {md.get('url', '')}
-Contenu : {doc.page_content}
-"""
+            content = str(doc.page_content).strip()
+            block = "\n".join(
+                [
+                    f"Événement {i}",
+                    f"Titre : {md.get('title', '')}",
+                    f"Lieu : {md.get('location_name', '')}",
+                    f"Ville : {md.get('city', '')}",
+                    f"Région : {md.get('region', '')}",
+                    f"Date de début : {md.get('first_date', '')}",
+                    f"Date de fin : {md.get('last_date', '')}",
+                    f"Type : {md.get('event_type', '')}",
+                    f"URL : {md.get('url', '')}",
+                    f"Contenu : {content}",
+                ]
+            )
             blocks.append(block.strip())
 
         return "\n\n".join(blocks)
@@ -461,6 +602,9 @@ Contenu : {doc.page_content}
         str
             Réponse générée par le modèle de langage.
         """
+        if not docs:
+            return self.FALLBACK_NO_RESULT_MESSAGE
+
         full_context = self.build_full_context(question=question, docs=docs)
 
         return self.chain.invoke(
@@ -550,20 +694,11 @@ Contenu : {doc.page_content}
                 for doc_data in choice_result.get("documents", [])
             ]
 
-            response = AskResponse(
+            return self._build_ask_response(
                 question=question,
                 answer=choice_result.get("answer", ""),
-                n_docs=len(choice_docs),
                 documents=choice_docs,
             )
-
-            self.memory_service.add_entry(
-                question=question,
-                answer=response.answer,
-                documents=[doc.model_dump() for doc in response.documents],
-            )
-
-            return response
 
         # Cas 2 : la même question existe déjà dans la mémoire.
         exact_memory = self.memory_service.find_exact_question(question)
@@ -573,20 +708,11 @@ Contenu : {doc.page_content}
                 for doc_data in exact_memory.get("documents", [])
             ]
 
-            response = AskResponse(
+            return self._build_ask_response(
                 question=question,
                 answer=exact_memory.get("answer", ""),
-                n_docs=len(memory_docs),
                 documents=memory_docs,
             )
-
-            self.memory_service.add_entry(
-                question=question,
-                answer=response.answer,
-                documents=[doc.model_dump() for doc in response.documents],
-            )
-
-            return response
 
         # Cas 3 : exécution normale du pipeline RAG.
         docs = self.retrieve(question=question, k=k)
@@ -601,18 +727,17 @@ Contenu : {doc.page_content}
             for doc in docs
         ]
 
-        response = AskResponse(
+        response = self._build_ask_response(
             question=question,
             answer=answer,
-            n_docs=len(docs),
             documents=retrieved_docs,
         )
 
         # Sauvegarde de la nouvelle interaction dans la mémoire locale.
-        self.memory_service.add_entry(
+        self._save_interaction_in_memory(
             question=question,
             answer=answer,
-            documents=[doc.model_dump() for doc in retrieved_docs],
+            documents=retrieved_docs,
         )
 
         return response

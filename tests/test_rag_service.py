@@ -94,8 +94,6 @@ def patched_rag(monkeypatch):
     monkeypatch.setattr("app.rag_service.ChatMistralAI", fake_llm_factory)
     monkeypatch.setattr("app.rag_service.MemoryService", FakeMemoryService)
 
-    # Neutralise la logique documentaire pour garder des tests stables
-    # et focalisés sur l'orchestration du service RAG.
     monkeypatch.setattr(
         "app.rag_service.extract_filters_from_question",
         lambda question, documents: {
@@ -214,7 +212,9 @@ def test_retrieve_uses_initial_fetch_k(patched_rag, sample_documents):
     assert len(docs) == 2
 
 
-def test_retrieve_falls_back_to_raw_docs_when_all_filtered_out(patched_rag, sample_documents, monkeypatch):
+def test_retrieve_falls_back_to_raw_docs_when_all_filtered_out(
+    patched_rag, sample_documents, monkeypatch
+):
     rag = RAGService()
     rag.vectorstore = FakeVectorStore(sample_documents)
 
@@ -280,6 +280,18 @@ def test_generate_uses_chain(patched_rag, sample_documents):
     assert result == "Réponse générée"
 
 
+def test_generate_returns_fallback_when_no_docs(patched_rag):
+    rag = RAGService()
+
+    result = rag.generate(
+        "question test",
+        [],
+        current_date="2026-03-18",
+    )
+
+    assert result == rag.FALLBACK_NO_RESULT_MESSAGE
+
+
 def test_to_retrieved_document(patched_rag, sample_documents):
     rag = RAGService()
 
@@ -325,7 +337,7 @@ def test_ask_choice_result_branch(patched_rag):
     assert response.answer.startswith("Voici l'événement correspondant")
     assert response.n_docs == 1
     assert response.documents[0].title == "Expo choix"
-    assert len(rag.memory_service.entries) == 1
+    assert len(rag.memory_service.entries) == 0
 
 
 def test_ask_exact_memory_branch(patched_rag):
@@ -354,7 +366,7 @@ def test_ask_exact_memory_branch(patched_rag):
     assert response.answer == "Réponse retrouvée en mémoire"
     assert response.n_docs == 1
     assert response.documents[0].title == "Expo mémoire"
-    assert len(rag.memory_service.entries) == 1
+    assert len(rag.memory_service.entries) == 0
 
 
 def test_ask_normal_rag_pipeline(patched_rag, sample_documents):

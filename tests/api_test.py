@@ -37,6 +37,15 @@ class FakeRAGService:
 app.dependency_overrides[require_api_key] = lambda: "test-key"
 
 
+def test_root_redirects_to_docs():
+    client = TestClient(app)
+
+    response = client.get("/", follow_redirects=False)
+
+    assert response.status_code in (307, 308)
+    assert response.headers["location"] == "/docs"
+
+
 def test_health(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGService())
     client = TestClient(app)
@@ -53,16 +62,21 @@ def test_ask(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGService())
     client = TestClient(app)
 
+    question = "Je cherche une exposition d'architecture à Montpellier"
+
     response = client.post(
         "/ask",
-        json={"question": "Je cherche une exposition d'architecture à Montpellier"},
+        json={"question": question},
     )
 
     assert response.status_code == 200
     data = response.json()
-    assert "answer" in data
+    assert data["question"] == question
+    assert data["answer"] == "Voici une exposition d'architecture à Montpellier."
     assert data["n_docs"] == 1
-    assert data["question"] == "Je cherche une exposition d'architecture à Montpellier"
+    assert len(data["documents"]) == 1
+    assert data["documents"][0]["title"] == "Expo Archi"
+    assert data["documents"][0]["city"] == "Montpellier"
 
 
 def test_rebuild(monkeypatch):
