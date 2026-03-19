@@ -790,7 +790,7 @@ def _resolve_relative_date_filters(question: str) -> tuple[str | None, str | Non
     q = normalize_text(question)
     today = date.today()
 
-    if "aujourd hui" in q or "aujourdhui" in q:
+    if "aujourd hui" in q or "aujourdhui" in q or "aujourd'hui" in q:
         iso = today.isoformat()
         return iso, iso
 
@@ -802,7 +802,7 @@ def _resolve_relative_date_filters(question: str) -> tuple[str | None, str | Non
         iso = today.isoformat()
         return iso, iso
 
-    if "ce week end" in q or "weekend" in q or "week end" in q:
+    if "ce week end" in q or "weekend" in q or "week end" in q or "week-end" in q:
         days_until_saturday = (5 - today.weekday()) % 7
         saturday = today + timedelta(days=days_until_saturday)
         sunday = saturday + timedelta(days=1)
