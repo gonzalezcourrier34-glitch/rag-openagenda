@@ -1074,11 +1074,17 @@ def doc_matches_filters(doc: Document, filters: dict[str, Any]) -> bool:
     date_start = _parse_iso_date(filters.get("date_start"))
     date_end = _parse_iso_date(filters.get("date_end"))
 
-    if date_start and last_date_obj and last_date_obj < date_start:
-        return False
+    # Si un filtre date existe, on exige une vraie cohérence temporelle
+    if date_start or date_end:
 
-    if date_end and first_date_obj and first_date_obj > date_end:
-        return False
+        if not first_date_obj or not last_date_obj:
+            return False  # on rejette les événements mal datés
+
+        if date_start and last_date_obj < date_start:
+            return False
+
+        if date_end and first_date_obj > date_end:
+            return False
 
     return True
 
@@ -1142,8 +1148,18 @@ def score_document(question: str, doc: Document, filters: dict[str, Any]) -> flo
     keyword_hits = sum(1 for keyword in filters["keywords"] if keyword in full_text)
     score += keyword_hits * SCORE_WEIGHTS["keyword_match"]
 
-    if filters.get("date_start") or filters.get("date_end"):
-        score += SCORE_WEIGHTS["date_filter_bonus"]
+    date_start = _parse_iso_date(filters.get("date_start"))
+    date_end = _parse_iso_date(filters.get("date_end"))
+
+    first_date_obj = _parse_iso_date(md.get("first_date", ""))
+    last_date_obj = _parse_iso_date(md.get("last_date", ""))
+
+    if date_start or date_end:
+        if first_date_obj and last_date_obj:
+            if not (date_start and last_date_obj < date_start) and not (
+                date_end and first_date_obj > date_end
+            ):
+                score += SCORE_WEIGHTS["date_filter_bonus"]
 
     normalized_question = normalize_text(question)
     question_tokens = set(normalized_question.split())
