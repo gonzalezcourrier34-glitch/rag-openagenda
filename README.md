@@ -22,29 +22,29 @@
 <h2>Sommaire</h2>
 
 <ul>
-  <li><a href="#quick-start">🚀 Quick Start</a></li>
-  <li><a href="#presentation">🧠 Présentation du projet</a></li>
-  <li><a href="#objectifs">🎯 Objectifs du projet</a></li>
-  <li><a href="#architecture">⚙️ Architecture du système</a></li>
-  <li><a href="#pipeline">🔄 Pipeline RAG</a></li>
-  <li><a href="#donnees">📊 Données et vectorisation</a></li>
-  <li><a href="#modele">🤖 Modèle NLP</a></li>
-  <li><a href="#api">🔌 API</a></li>
-  <li><a href="#tests">🧪 Tests</a></li>
-  <li><a href="#structure">🧱 Structure du projet</a></li>
-  <li><a href="#interface">🖥️ Interface utilisateur</a></li>
-  <li><a href="#infrastructure">📦 Infrastructure</a></li>
-  <li><a href="#limites">⚠️ Limites du prototype</a></li>
-  <li><a href="#ameliorations">🚀 Pistes d’amélioration</a></li>
-  <li><a href="#configuration">⚙️ Configuration</a></li>
-  <li><a href="#lancement">▶️ Lancer le projet</a></li>
-  <li><a href="#auteur">👤 Auteur</a></li>
-  <li><a href="#licence">📄 Licence</a></li>
+  <li><a href="#section-1">1. Quick Start</a></li>
+  <li><a href="#section-2">2. Présentation du projet</a></li>
+  <li><a href="#section-3">3. Objectifs du projet</a></li>
+  <li><a href="#section-4">4. Architecture du système</a></li>
+  <li><a href="#section-5">5. Pipeline RAG</a></li>
+  <li><a href="#section-6">6. Données et vectorisation</a></li>
+  <li><a href="#section-7">7. Modèle NLP</a></li>
+  <li><a href="#section-8">8. API</a></li>
+  <li><a href="#section-9">9. Tests</a></li>
+  <li><a href="#section-10">10. Structure du projet</a></li>
+  <li><a href="#section-11">11. Interface utilisateur</a></li>
+  <li><a href="#section-12">12. Infrastructure</a></li>
+  <li><a href="#section-13">13. Limites du prototype</a></li>
+  <li><a href="#section-14">14. Pistes d’amélioration</a></li>
+  <li><a href="#section-15">15. Configuration</a></li>
+  <li><a href="#section-16">16. Lancer le projet</a></li>
+  <li><a href="#section-17">17. Auteur</a></li>
+  <li><a href="#section-18">18. Licence</a></li>
 </ul>
 
 <hr>
 
-<h2 id="quick-start">🚀 Quick Start</h2>
+<h2 id="section-1">1. Quick Start</h2>
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
@@ -67,14 +67,14 @@ docker compose up --build</code></pre>
 </ol>
 
 <div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
-  <strong>⚠️ Important</strong><br><br>
+  <strong>Important</strong><br><br>
   Le système <strong>ne fonctionne pas tant que l’index n’est pas construit</strong>.<br>
   Il faut exécuter <code>/rebuild</code> avant toute première utilisation.
 </div>
 
 <hr>
 
-<h2 id="presentation">🧠 Présentation du projet</h2>
+<h2 id="section-2">2. Présentation du projet</h2>
 
 <p>
 Dans ce projet, j’ai conçu un assistant intelligent capable de recommander des événements culturels à partir d’une question formulée en langage naturel.
@@ -101,7 +101,7 @@ Ce projet m’a permis de travailler sur une chaîne complète, depuis la collec
 
 <hr>
 
-<h2 id="objectifs">🎯 Objectifs du projet</h2>
+<h2 id="section-3">3. Objectifs du projet</h2>
 
 <h3 style="color: #48C9B0;">Contexte</h3>
 
@@ -161,7 +161,7 @@ et obtenir une réponse générée à partir d’événements réellement prése
 
 <hr>
 
-<h2 id="architecture">⚙️ Architecture du système</h2>
+<h2 id="section-4">4. Architecture du système</h2>
 
 <p>
 L’architecture repose sur une chaîne de traitement modulaire dans laquelle chaque composant remplit un rôle précis.
@@ -220,7 +220,7 @@ Ce découpage m’a permis de séparer clairement :
 
 <hr>
 
-<h2 id="pipeline">🔄 Pipeline RAG</h2>
+<h2 id="section-5">5. Pipeline RAG</h2>
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
@@ -239,7 +239,7 @@ Cette organisation permet de mieux contrôler la qualité des résultats et de l
 
 <hr>
 
-<h2 id="donnees">📊 Données et vectorisation</h2>
+<h2 id="section-6">6. Données et vectorisation</h2>
 
 <h3 style="color: #48C9B0;">Source de données</h3>
 
@@ -282,19 +282,92 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
 <p>
 Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement comme un document unique</strong>. Ce choix est adapté au format des données et au périmètre du prototype.
 </p>
+<p>
+Un exemple de structure de document :
+Document(
+    page_content="<fiche courte lisible pour le LLM contenant : >",
+        "Titre : "
+        "Description :"
+        "Lieu :"
+        "Ville :"
+        "Région :"
+        "Date de début :"
+        "Date de fin :"
+        "Type :"
+        "Tarification :"
+        "URL :"
+    metadata={
+        "doc_id": "<identifiant documentaire>",
+        "event_uid": "<uid OpenAgenda>",
+        "agenda_uid": "<uid agenda>",
+        "source": "openagenda",
+
+        "title": "<titre nettoyé>",
+        "description": "<description complète nettoyée>",
+        "long_description": "<description longue nettoyée>",
+        "description_short": "<description courte pour page_content>",
+        "description_search": "<description optimisée pour embedding>",
+        "long_description_search": "<longue description optimisée pour embedding>",
+
+        "location_name": "<lieu>",
+        "city": "<ville>",
+        "region": "<région>",
+        "first_date": "<YYYY-MM-DD>",
+        "last_date": "<YYYY-MM-DD>",
+
+        "event_type": "<type brut>",
+        "canonical_event_type": "<type canonique>",
+        "music_genre": "<genre musical canonique>",
+
+        "source_url": "<url source>",
+        "url": "<url source>",
+
+        "price_info": "<gratuit|payant|inconnu...>",
+        "is_free": True | False | None,
+
+        "keywords_title": [...],
+        "derived_event_terms": [...],
+        "derived_music_terms": [...],
+        "audience_terms": [...],
+        "cultural_tags": [...],
+
+        "search_text": "<texte riche pour embeddings>",
+
+        "title_norm": "<texte normalisé>",
+        "location_name_norm": "<texte normalisé>",
+        "city_norm": "<texte normalisé>",
+        "region_norm": "<texte normalisé>",
+        "event_type_norm": "<texte normalisé>",
+        "music_genre_norm": "<texte normalisé>",
+
+        "duration_label": "<libellé métier>",
+        "duration_days": <int|None>,
+        "is_single_day": <bool|None>,
+        "has_long_description": <bool>,
+        "content_quality": <int>,
+    }
+)
+</p>
 
 <p>
 Le texte utilisé pour la vectorisation est construit à partir des informations les plus utiles :
 </p>
 
 <ul>
-  <li>titre</li>
-  <li>description</li>
-  <li>lieu</li>
-  <li>ville</li>
-  <li>région</li>
-  <li>dates</li>
-  <li>type d’événement</li>
+  <li>le titre de l’événement</li>
+  <li>le type d’événement brut et sa version canonique</li>
+  <li>le genre musical canonique lorsqu’il existe</li>
+  <li>le lieu, la ville et la région</li>
+  <li>les dates de début et de fin</li>
+  <li>les informations de tarification et d’accessibilité</li>
+  <li>un libellé métier sur la durée de l’événement</li>
+  <li>une description courte enrichie pour la recherche</li>
+  <li>une description longue tronquée et contrôlée</li>
+  <li>des mots-clés extraits du titre</li>
+  <li>des termes dérivés liés au type d’événement</li>
+  <li>des termes musicaux dérivés lorsque le contexte le justifie</li>
+  <li>des termes liés au public visé</li>
+  <li>des tags culturels déduits automatiquement</li>
 </ul>
 
 <h3 style="color: #48C9B0;">Embeddings</h3>
@@ -304,7 +377,7 @@ Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral
 </p>
 
 <div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
-  <strong>⚠️ Important</strong><br><br>
+  <strong>Important</strong><br><br>
   La qualité des réponses dépend directement :
   <ul>
     <li>des événements réellement disponibles dans OpenAgenda</li>
@@ -315,7 +388,7 @@ Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral
 
 <hr>
 
-<h2 id="modele">🤖 Modèle NLP</h2>
+<h2 id="section-7">7. Modèle NLP</h2>
 
 <p>
 Pour la génération de réponses, j’ai choisi <strong>Mistral Small</strong>.
@@ -341,7 +414,7 @@ La principale limite reste la dépendance à la qualité du retrieval. Si les do
 
 <hr>
 
-<h2>🧠 Base vectorielle</h2>
+<h2>Base vectorielle</h2>
 
 <p>
 La base vectorielle est construite avec <strong>FAISS</strong>. Une fois les embeddings générés, les documents sont stockés dans l’index puis sauvegardés localement.
@@ -373,7 +446,7 @@ Chaque document conserve également des métadonnées utiles, notamment :
 
 <hr>
 
-<h2 id="api">🔌 API</h2>
+<h2 id="section-8">8. API</h2>
 
 <p>
 J’ai développé l’API avec <strong>FastAPI</strong> afin d’exposer le système sous forme de service REST.
@@ -427,7 +500,7 @@ Cet endpoint joue un rôle central lors du premier démarrage, car l’API doit 
 
 <hr>
 
-<h2 id="tests">🧪 Tests</h2>
+<h2 id="section-9">9. Tests</h2>
 
 <p>
 Afin de fiabiliser le projet, j’ai mis en place une base de tests automatisés sur les composants essentiels du système, notamment l’API, certains services applicatifs et les comportements attendus sur les endpoints principaux.
@@ -453,7 +526,7 @@ Cette démarche permet de vérifier plus facilement :
 
 <hr>
 
-<h2 id="structure">🧱 Structure du projet</h2>
+<h2 id="section-10">10. Structure du projet</h2>
 
 <pre><code>project/
 │
@@ -497,7 +570,7 @@ Chaque module correspond à une brique du système, ce qui rend le projet plus l
 
 <hr>
 
-<h2 id="interface">🖥️ Interface utilisateur</h2>
+<h2 id="section-11">11. Interface utilisateur</h2>
 
 <p>
 J’ai également développé une interface <strong>Streamlit</strong> pour faciliter l’utilisation du système.
@@ -515,7 +588,7 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
 
 <hr>
 
-<h2 id="infrastructure">📦 Infrastructure</h2>
+<h2 id="section-12">12. Infrastructure</h2>
 
 <h3 style="color: #48C9B0;">MLflow</h3>
 
@@ -544,7 +617,7 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
 
 <hr>
 
-<h2 id="limites">⚠️ Limites du prototype</h2>
+<h2 id="section-13">13. Limites du prototype</h2>
 
 <ul>
   <li>la qualité dépend fortement des données disponibles dans OpenAgenda</li>
@@ -557,7 +630,7 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
 
 <hr>
 
-<h2 id="ameliorations">🚀 Pistes d’amélioration</h2>
+<h2 id="section-14">14. Pistes d’amélioration</h2>
 
 <ul>
   <li>ajout d’un reranking plus avancé des documents</li>
@@ -572,7 +645,7 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
 
 <hr>
 
-<h2 id="configuration">⚙️ Configuration</h2>
+<h2 id="section-15">15. Configuration</h2>
 
 <h3 style="color: #48C9B0;">Prérequis</h3>
 
@@ -620,7 +693,7 @@ TYPE_ZONE=city</code></pre>
 
 <hr>
 
-<h2 id="lancement">▶️ Lancer le projet</h2>
+<h2 id="section-16">16. Lancer le projet</h2>
 
 <h3 style="color: #48C9B0;">1. Construire et démarrer les services</h3>
 
@@ -686,7 +759,7 @@ Une fois l’index reconstruit, il est possible de poser une question depuis le 
 
 <hr>
 
-<h2>📌 Résumé rapide</h2>
+<h2>Résumé rapide</h2>
 
 <pre><code>git clone repo_url
 cd pocrag
@@ -705,7 +778,7 @@ docker compose up --build</code></pre>
 
 <hr>
 
-<h2 id="auteur">👤 Auteur</h2>
+<h2 id="section-17">17. Auteur</h2>
 
 <p>
 Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage autour des architectures RAG, des applications LLM et des systèmes d’IA applicatifs.
@@ -713,6 +786,6 @@ Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un ap
 
 <hr>
 
-<h2 id="licence">📄 Licence</h2>
+<h2 id="section-18">18. Licence</h2>
 
 <p>Usage éducatif.</p>
