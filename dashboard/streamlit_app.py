@@ -20,8 +20,10 @@ des appels HTTP pour communiquer avec l'API.
 
 from __future__ import annotations
 
+import html
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 import streamlit as st
@@ -81,6 +83,106 @@ st.markdown(
 )
 
 
+# -------------------------------------------------------------------------
+# Utilitaires de configuration et validation
+# -------------------------------------------------------------------------
+
+def is_valid_http_url(url: str) -> bool:
+    """
+    Vérifie qu'une URL HTTP/HTTPS est valide.
+
+    Parameters
+    ----------
+    url : str
+        URL à valider.
+
+    Returns
+    -------
+    bool
+        True si l'URL semble valide, sinon False.
+    """
+    if not url:
+        return False
+
+    parsed = urlparse(url)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def sanitize_text(value: object, default: str = "") -> str:
+    """
+    Nettoie et échappe une valeur textuelle pour affichage HTML.
+
+    Parameters
+    ----------
+    value : object
+        Valeur à convertir.
+    default : str, optional
+        Valeur de secours si la donnée est vide.
+
+    Returns
+    -------
+    str
+        Texte sécurisé pour injection dans un bloc HTML.
+    """
+    if value is None:
+        return default
+
+    text = str(value).strip()
+    if not text:
+        return default
+
+    return html.escape(text)
+
+
+def is_safe_event_url(url: str) -> bool:
+    """
+    Vérifie qu'une URL de redirection est sûre pour l'affichage d'un bouton.
+
+    Parameters
+    ----------
+    url : str
+        URL à vérifier.
+
+    Returns
+    -------
+    bool
+        True si l'URL est HTTP/HTTPS, sinon False.
+    """
+    return is_valid_http_url(url)
+
+
+def show_http_error(response: requests.Response) -> None:
+    """
+    Affiche une erreur HTTP de façon plus lisible selon le code de statut.
+
+    Parameters
+    ----------
+    response : requests.Response
+        Réponse HTTP à interpréter.
+    """
+    if response.status_code == 401:
+        st.error("Accès refusé : clé API invalide ou absente.")
+        return
+
+    if response.status_code == 403:
+        st.error("Accès interdit.")
+        return
+
+    if response.status_code == 404:
+        st.error("Endpoint introuvable.")
+        return
+
+    if response.status_code >= 500:
+        st.error(f"Erreur serveur : {get_error_message(response)}")
+        return
+
+    st.error(get_error_message(response))
+
+
+# -------------------------------------------------------------------------
+# Fonctions HTTP
+# -------------------------------------------------------------------------
+
 def get_headers() -> dict[str, str]:
     """
     Construit les en-têtes HTTP utilisés pour les appels à l'API.
@@ -113,11 +215,15 @@ def get_error_message(response: requests.Response) -> str:
     try:
         payload = response.json()
         if isinstance(payload, dict):
-            return payload.get("detail", str(payload))
+            detail = payload.get("detail")
+            if detail:
+                return str(detail)
+            return str(payload)
     except Exception:
         pass
 
-    return response.text or f"Erreur HTTP {response.status_code}"
+    text = (response.text or "").strip()
+    return text or f"Erreur HTTP {response.status_code}"
 
 
 def call_health() -> requests.Response:
@@ -177,9 +283,13 @@ def call_ask(question: str) -> requests.Response:
         f"{API_URL}/ask",
         json={"question": question},
         headers=get_headers(),
-        timeout=180,
+        timeout=90,
     )
 
+
+# -------------------------------------------------------------------------
+# Fonctions d'affichage
+# -------------------------------------------------------------------------
 
 def format_date_range(first_date: str, last_date: str) -> str:
     """
@@ -216,7 +326,7 @@ def render_answer(answer: str) -> None:
         Réponse textuelle produite par le système.
     """
     st.markdown("### Recommandation")
-    formatted_answer = answer.replace("\n", "<br>")
+    formatted_answer = sanitize_text(answer, default="").replace("\n", "<br>")
 
     st.markdown(
         f'<div class="box">{formatted_answer}</div>',
@@ -239,32 +349,32 @@ def render_documents(documents: list[dict]) -> None:
     st.markdown("### Événements proposés")
 
     for i, doc in enumerate(documents, start=1):
-        title = doc.get("title", "Événement sans titre")
-        location_name = doc.get("location_name", "")
-        city = doc.get("city", "")
-        region = doc.get("region", "")
-        first_date = doc.get("first_date", "")
-        last_date = doc.get("last_date", "")
-        event_type = doc.get("event_type", "")
-        url = doc.get("url", "")
+        title = sanitize_text(doc.get("title"), "Événement sans titre")
+        location_name = sanitize_text(doc.get("location_name"), "Non précisé")
+        city = sanitize_text(doc.get("city"), "Non précisée")
+        region = sanitize_text(doc.get("region"), "Non précisée")
+        first_date = sanitize_text(doc.get("first_date"), "")
+        last_date = sanitize_text(doc.get("last_date"), "")
+        event_type = sanitize_text(doc.get("event_type"), "Non précisé")
+        url = str(doc.get("url", "")).strip()
 
-        date_text = format_date_range(first_date, last_date)
+        date_text = sanitize_text(format_date_range(first_date, last_date), "Non précisée")
 
         st.markdown(
             f"""
             <div class="card">
                 <h4>{i}. {title}</h4>
-                <p><strong>Lieu :</strong> {location_name or "Non précisé"}</p>
-                <p><strong>Ville :</strong> {city or "Non précisée"}</p>
-                <p><strong>Région :</strong> {region or "Non précisée"}</p>
+                <p><strong>Lieu :</strong> {location_name}</p>
+                <p><strong>Ville :</strong> {city}</p>
+                <p><strong>Région :</strong> {region}</p>
                 <p><strong>Date :</strong> {date_text}</p>
-                <p><strong>Type :</strong> {event_type or "Non précisé"}</p>
+                <p><strong>Type :</strong> {event_type}</p>
             </div>
             """,
             unsafe_allow_html=True,
         )
 
-        if url:
+        if url and is_safe_event_url(url):
             st.link_button(f"Voir la fiche de l’événement {i}", url)
 
 
@@ -279,25 +389,27 @@ def render_history_item(item: dict, index: int) -> None:
     index : int
         Position de l'élément dans l'affichage.
     """
-    formatted_history_answer = item["answer"].replace("\n", "<br>")
+    question = sanitize_text(item.get("question"), "Question inconnue")
+    answer = sanitize_text(item.get("answer"), "").replace("\n", "<br>")
+    n_docs = item.get("n_docs", 0)
 
-    with st.expander(f"{index}. {item['question']}"):
+    with st.expander(f"{index}. {question}"):
         st.markdown("**Réponse :**")
         st.markdown(
-            f'<div class="history">{formatted_history_answer}</div>',
+            f'<div class="history">{answer}</div>',
             unsafe_allow_html=True,
         )
 
-        st.markdown(f"**Documents utilisés :** {item['n_docs']}")
+        st.markdown(f"**Documents utilisés :** {n_docs}")
 
         docs = item.get("documents", [])
         if docs:
             st.markdown("**Sources récupérées :**")
             for doc in docs:
-                st.markdown(
-                    f"- **{doc.get('title', '')}** "
-                    f"({doc.get('city', '')}, {doc.get('first_date', '')})"
-                )
+                title = sanitize_text(doc.get("title"), "Sans titre")
+                city = sanitize_text(doc.get("city"), "Ville inconnue")
+                first_date = sanitize_text(doc.get("first_date"), "Date inconnue")
+                st.markdown(f"- **{title}** ({city}, {first_date})")
 
 
 def render_metrics(answer: str, n_docs: int) -> None:
@@ -317,8 +429,12 @@ def render_metrics(answer: str, n_docs: int) -> None:
         st.metric("Documents utilisés", n_docs)
 
     with col2:
-        st.metric("Longueur de la réponse", len(answer))
+        st.metric("Longueur de la réponse", len(answer or ""))
 
+
+# -------------------------------------------------------------------------
+# État de session
+# -------------------------------------------------------------------------
 
 if "history" not in st.session_state:
     st.session_state.history = []
@@ -327,13 +443,25 @@ if "health_data" not in st.session_state:
     st.session_state.health_data = None
 
 
-if not API_KEY:
-    st.warning("API_KEY manquante")
+# -------------------------------------------------------------------------
+# Vérification minimale de configuration
+# -------------------------------------------------------------------------
 
+if not is_valid_http_url(API_URL):
+    st.error("Configuration invalide : API_URL absente ou incorrecte.")
+    st.stop()
+
+if not API_KEY:
+    st.error("Configuration invalide : API_KEY absente.")
+    st.stop()
+
+
+# -------------------------------------------------------------------------
+# Interface principale
+# -------------------------------------------------------------------------
 
 st.title("Assistant culturel OpenAgenda")
 st.caption("Trouvez des événements culturels via langage naturel")
-
 
 st.sidebar.header("Contrôles API")
 st.sidebar.write(f"**URL API :** `{API_URL}`")
@@ -348,6 +476,8 @@ if st.sidebar.button("Vérifier /health", use_container_width=True):
         else:
             st.sidebar.error(get_error_message(response))
 
+    except requests.RequestException as exc:
+        st.sidebar.error(f"Erreur réseau : {exc}")
     except Exception as exc:
         st.sidebar.error(str(exc))
 
@@ -382,19 +512,23 @@ with tab_chat:
         if question.strip():
             try:
                 with st.spinner("Recherche..."):
-                    response = call_ask(question)
+                    response = call_ask(question.strip())
 
                 if response.ok:
                     data = response.json()
                     st.session_state.history.insert(0, data)
 
-                    render_answer(data["answer"])
-                    render_metrics(data["answer"], data["n_docs"])
-                    render_documents(data["documents"])
-
+                    render_answer(data.get("answer", ""))
+                    render_metrics(
+                        data.get("answer", ""),
+                        data.get("n_docs", 0),
+                    )
+                    render_documents(data.get("documents", []))
                 else:
-                    st.error(get_error_message(response))
+                    show_http_error(response)
 
+            except requests.RequestException as exc:
+                st.error(f"Erreur réseau : {exc}")
             except Exception as exc:
                 st.error(str(exc))
         else:
@@ -424,19 +558,24 @@ with tab_admin:
         )
 
         if st.button("Rebuild", use_container_width=True):
-            try:
-                with st.spinner("Rebuild..."):
-                    response = call_rebuild(zone, scope)
+            if not zone.strip():
+                st.warning("Veuillez renseigner une zone.")
+            else:
+                try:
+                    with st.spinner("Rebuild..."):
+                        response = call_rebuild(zone.strip(), scope)
 
-                if response.ok:
-                    data = response.json()
-                    st.success(data.get("message", "Reconstruction terminée."))
-                    st.info(f"Documents indexés : {data.get('n_docs_indexed', 0)}")
-                else:
-                    st.error(get_error_message(response))
+                    if response.ok:
+                        data = response.json()
+                        st.success(data.get("message", "Reconstruction terminée."))
+                        st.info(f"Documents indexés : {data.get('n_docs_indexed', 0)}")
+                    else:
+                        show_http_error(response)
 
-            except Exception as exc:
-                st.error(str(exc))
+                except requests.RequestException as exc:
+                    st.error(f"Erreur réseau : {exc}")
+                except Exception as exc:
+                    st.error(str(exc))
 
     with col2:
         st.subheader("État de l'API")
@@ -449,8 +588,10 @@ with tab_admin:
                     st.session_state.health_data = response.json()
                     st.success("API OK")
                 else:
-                    st.error(get_error_message(response))
+                    show_http_error(response)
 
+            except requests.RequestException as exc:
+                st.error(f"Erreur réseau : {exc}")
             except Exception as exc:
                 st.error(str(exc))
 

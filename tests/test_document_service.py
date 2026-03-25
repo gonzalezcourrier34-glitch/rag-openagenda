@@ -195,8 +195,8 @@ def test_build_cultural_tags_for_exhibition():
 def test_build_search_text_contains_core_fields():
     text = ds._build_search_text(
         title="Concert jazz",
-        description="Une soirée musicale",
-        long_description="Avec plusieurs artistes",
+        description_search="Une soirée musicale",
+        long_description_search="Avec plusieurs artistes",
         location_name="Salle Victoire 2",
         city="Montpellier",
         region="Occitanie",
@@ -214,12 +214,13 @@ def test_build_search_text_contains_core_fields():
         derived_music_terms=["jazz"],
         cultural_tags=["musique", "concert"],
     )
+
     assert "concert jazz" in text.lower()
     assert "montpellier" in text.lower()
     assert "gratuit" in text.lower()
     assert "musique" in text.lower()
 
-
+    
 # -------------------------------------------------------------------------
 # Cohérence zone / scope
 # -------------------------------------------------------------------------

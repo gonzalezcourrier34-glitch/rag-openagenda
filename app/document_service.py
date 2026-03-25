@@ -15,6 +15,19 @@ Les documents produits sont utilisés pour :
 - la génération de réponse dans rag_service
 
 Ce module ne contient aucune logique de ranking ni de génération.
+
+Philosophie documentaire
+------------------------
+Deux représentations textuelles coexistent volontairement :
+
+- page_content :
+  texte court, structuré, lisible, destiné au contexte LLM
+- search_text :
+  texte plus riche, optimisé pour l'embedding, le matching lexical
+  léger et le ranking métier
+
+Le contrôle de longueur est centralisé ici afin d'éviter de polluer
+rag_service avec des considérations de préparation documentaire.
 """
 
 from __future__ import annotations
@@ -31,6 +44,30 @@ from app.lexical_service import LexicalService
 
 LEX = LexicalService()
 
+
+# -------------------------------------------------------------------------
+# Paramètres documentaires
+# -------------------------------------------------------------------------
+
+# Description visible dans page_content :
+# courte, lisible, utile au LLM.
+MAX_PAGE_DESCRIPTION_CHARS = 320
+
+# Description enrichissant le search_text :
+# plus riche que celle du page_content, mais contrôlée.
+MAX_SEARCH_DESCRIPTION_CHARS = 420
+
+# Longue description :
+# utile pour enrichir l'embedding, mais à plafonner fortement.
+MAX_SEARCH_LONG_DESCRIPTION_CHARS = 520
+
+# Longueur maximale globale du search_text final.
+MAX_SEARCH_TEXT_CHARS = 900
+
+
+# -------------------------------------------------------------------------
+# Helpers de base
+# -------------------------------------------------------------------------
 
 def _nested_get(data: dict[str, Any], *keys: str) -> Any:
     """
@@ -68,6 +105,49 @@ def _extract_event_field(event: dict[str, Any], *paths: tuple[str, ...]) -> str:
             candidates.append(_nested_get(event, *path))
 
     return _first_non_empty(*candidates)
+
+
+def _normalize_whitespace(value: object) -> str:
+    """
+    Normalise les espaces et retours ligne d'un texte.
+    """
+    text = LEX.extract_text(value)
+    if not text:
+        return ""
+
+    return " ".join(text.split())
+
+
+def _truncate_text(value: object, max_chars: int) -> str:
+    """
+    Tronque un texte proprement sans couper brutalement au milieu d'un mot.
+
+    Règles :
+    - extraction texte via LexicalService
+    - normalisation des espaces
+    - coupe à max_chars si nécessaire
+    - essaie de couper sur le dernier espace disponible
+    """
+    text = _normalize_whitespace(value)
+    if not text:
+        return ""
+
+    if len(text) <= max_chars:
+        return text
+
+    truncated = text[:max_chars]
+
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+
+    return truncated.rstrip(" ,;:.-") + "..."
+
+
+def _join_non_empty(parts: list[str], sep: str = " ") -> str:
+    """
+    Concatène uniquement les éléments non vides.
+    """
+    return sep.join(part for part in parts if part)
 
 
 # -------------------------------------------------------------------------
@@ -156,6 +236,10 @@ def _compute_duration_days(first_date: str, last_date: str) -> int | None:
     return max(1, (dt_end.date() - dt_start.date()).days + 1)
 
 
+# -------------------------------------------------------------------------
+# Qualité / enrichissement
+# -------------------------------------------------------------------------
+
 def _compute_content_quality(
     *,
     title: str,
@@ -195,59 +279,6 @@ def _compute_content_quality(
     return score
 
 
-def _build_search_text(
-    *,
-    title: str,
-    description: str,
-    long_description: str,
-    location_name: str,
-    city: str,
-    region: str,
-    event_type: str,
-    canonical_event_type: str,
-    canonical_music_genre: str,
-    audience_terms: list[str],
-    first_date: str,
-    last_date: str,
-    price_info: str,
-    access_label: str,
-    duration_label: str,
-    title_keywords: list[str],
-    derived_terms: list[str],
-    derived_music_terms: list[str],
-    cultural_tags: list[str],
-) -> str:
-    """
-    Construit un texte consolidé riche pour :
-    - l'embedding
-    - le matching lexical léger
-    - le ranking métier
-    """
-    parts = [
-        title,
-        description,
-        long_description,
-        location_name,
-        city,
-        region,
-        event_type,
-        canonical_event_type,
-        canonical_music_genre,
-        first_date,
-        last_date,
-        price_info,
-        access_label,
-        duration_label,
-        " ".join(title_keywords),
-        " ".join(derived_terms),
-        " ".join(derived_music_terms),
-        " ".join(audience_terms),
-        " ".join(cultural_tags),
-    ]
-
-    return LEX.clean_text(" ".join(part for part in parts if part))
-
-
 def _build_cultural_tags(
     *,
     canonical_event_type: str,
@@ -280,6 +311,128 @@ def _build_cultural_tags(
         tags.update(["atelier"])
 
     return sorted(tags)
+
+
+def _build_page_content(
+    *,
+    title: str,
+    description_short: str,
+    location_name: str,
+    city: str,
+    region: str,
+    first_date: str,
+    last_date: str,
+    event_type_label: str,
+    canonical_music_genre: str,
+    price_info: str,
+    source_url: str,
+) -> str:
+    """
+    Construit la fiche courte destinée au LLM.
+
+    Objectifs :
+    - rester compacte
+    - garder les informations discriminantes
+    - éviter les descriptions trop longues
+    """
+    page_lines = [
+        f"Titre : {title}",
+        f"Description : {description_short}",
+        f"Lieu : {location_name}",
+        f"Ville : {city}",
+        f"Région : {region}",
+        f"Date de début : {first_date}",
+        f"Date de fin : {last_date}",
+        f"Type : {event_type_label}",
+    ]
+
+    if canonical_music_genre:
+        page_lines.append(f"Genre musical : {canonical_music_genre}")
+
+    page_lines.extend(
+        [
+            f"Tarification : {price_info}",
+            f"URL : {source_url}",
+        ]
+    )
+
+    return "\n".join(
+        line
+        for line in page_lines
+        if line.split(" : ", 1)[-1].strip()
+    )
+
+
+def _build_search_text(
+    *,
+    title: str,
+    description_search: str,
+    long_description_search: str,
+    location_name: str,
+    city: str,
+    region: str,
+    event_type: str,
+    canonical_event_type: str,
+    canonical_music_genre: str,
+    audience_terms: list[str],
+    first_date: str,
+    last_date: str,
+    price_info: str,
+    access_label: str,
+    duration_label: str,
+    title_keywords: list[str],
+    derived_terms: list[str],
+    derived_music_terms: list[str],
+    cultural_tags: list[str],
+    max_chars: int = MAX_SEARCH_TEXT_CHARS,
+) -> str:
+    """
+    Construit le texte riche destiné à :
+    - l'embedding
+    - le matching lexical léger
+    - le ranking métier
+
+    Principes :
+    - ordre des champs pensé pour maximiser le signal utile
+    - descriptions déjà tronquées en amont
+    - nettoyage final via LexicalService
+    - limite finale globale pour éviter les textes trop longs
+    """
+    parts = [
+        title,
+        canonical_event_type,
+        event_type,
+        canonical_music_genre,
+        location_name,
+        city,
+        region,
+        first_date,
+        last_date,
+        price_info,
+        access_label,
+        duration_label,
+        description_search,
+        long_description_search,
+        " ".join(title_keywords),
+        " ".join(derived_terms),
+        " ".join(derived_music_terms),
+        " ".join(audience_terms),
+        " ".join(cultural_tags),
+    ]
+
+    text = LEX.clean_text(_join_non_empty(parts, sep=" "))
+
+    if not text:
+        return ""
+
+    if len(text) <= max_chars:
+        return text
+
+    truncated = text[:max_chars]
+    if " " in truncated:
+        truncated = truncated.rsplit(" ", 1)[0]
+
+    return truncated.rstrip(" ,;:.-") + "..."
 
 
 # -------------------------------------------------------------------------
@@ -410,6 +563,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
     - enrichir utilement
     - rester prudent sur les champs canoniques
     - mieux vaut un champ vide qu'une mauvaise classification
+    - centraliser ici la préparation textuelle pour ne pas charger rag_service
     """
     event_uid = _extract_event_field(event, ("uid",))
     agenda_uid = _extract_event_field(event, ("agenda", "uid"))
@@ -476,6 +630,19 @@ def build_event_document(event: dict[str, Any]) -> Document:
         ("url",),
     )
 
+    # ------------------------------------------------------------------
+    # Préparation textuelle brute
+    # ------------------------------------------------------------------
+
+    title = _normalize_whitespace(title)
+    description = _normalize_whitespace(description)
+    long_description = _normalize_whitespace(long_description)
+    location_name = _normalize_whitespace(location_name)
+    city = _normalize_whitespace(city)
+    region = _normalize_whitespace(region)
+    event_type = _normalize_whitespace(event_type)
+    source_url = _normalize_whitespace(source_url)
+
     price_info, is_free = LEX.extract_price_info(
         title,
         description,
@@ -499,8 +666,10 @@ def build_event_document(event: dict[str, Any]) -> Document:
     canonical_event_type = profile["canonical_event_type"]
     canonical_music_genre = profile["music_genre"]
 
-    # Garde-fou : on ne garde un genre musical que si le contexte
-    # semble réellement musical.
+    # ------------------------------------------------------------------
+    # Garde-fou musical
+    # ------------------------------------------------------------------
+
     if canonical_music_genre:
         support_text = LEX.normalize_text(
             f"{title} {description} {long_description} {event_type} {canonical_event_type}"
@@ -565,37 +734,37 @@ def build_event_document(event: dict[str, Any]) -> Document:
         canonical_event_type=canonical_event_type,
     )
 
-    page_lines = [
-        f"Titre : {title}",
-        f"Description : {description}",
-        f"Lieu : {location_name}",
-        f"Ville : {city}",
-        f"Région : {region}",
-        f"Date de début : {first_date}",
-        f"Date de fin : {last_date}",
-        f"Type : {canonical_event_type or event_type}",
-    ]
+    # ------------------------------------------------------------------
+    # Versions textuelles contrôlées
+    # ------------------------------------------------------------------
 
-    if canonical_music_genre:
-        page_lines.append(f"Genre musical : {canonical_music_genre}")
-
-    page_lines.extend(
-        [
-            f"Tarification : {price_info}",
-            f"URL : {source_url}",
-        ]
+    description_short = _truncate_text(description, MAX_PAGE_DESCRIPTION_CHARS)
+    description_search = _truncate_text(description, MAX_SEARCH_DESCRIPTION_CHARS)
+    long_description_search = _truncate_text(
+        long_description,
+        MAX_SEARCH_LONG_DESCRIPTION_CHARS,
     )
 
-    page_content = "\n".join(
-        line
-        for line in page_lines
-        if line.split(" : ", 1)[-1].strip()
+    event_type_label = canonical_event_type or event_type
+
+    page_content = _build_page_content(
+        title=title,
+        description_short=description_short,
+        location_name=location_name,
+        city=city,
+        region=region,
+        first_date=first_date,
+        last_date=last_date,
+        event_type_label=event_type_label,
+        canonical_music_genre=canonical_music_genre,
+        price_info=price_info,
+        source_url=source_url,
     )
 
     search_text = _build_search_text(
         title=title,
-        description=description,
-        long_description=long_description,
+        description_search=description_search,
+        long_description_search=long_description_search,
         location_name=location_name,
         city=city,
         region=region,
@@ -622,6 +791,9 @@ def build_event_document(event: dict[str, Any]) -> Document:
         "title": title,
         "description": description,
         "long_description": long_description,
+        "description_short": description_short,
+        "description_search": description_search,
+        "long_description_search": long_description_search,
         "location_name": location_name,
         "city": city,
         "region": region,
@@ -644,7 +816,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
         "location_name_norm": LEX.normalize_text(location_name),
         "city_norm": LEX.normalize_text(city),
         "region_norm": LEX.normalize_text(region),
-        "event_type_norm": LEX.normalize_text(canonical_event_type or event_type),
+        "event_type_norm": LEX.normalize_text(event_type_label),
         "music_genre_norm": LEX.normalize_text(canonical_music_genre),
         "duration_label": duration_label,
         "duration_days": duration_days,

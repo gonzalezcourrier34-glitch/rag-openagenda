@@ -54,6 +54,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
+import time
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -266,6 +267,22 @@ Contexte :
 
         return docs_for_index
 
+    def _execute_with_retry(self, func, max_retries: int = 5):
+        """
+        Exécute une fonction avec retry simple en cas d'erreur 429.
+        """
+        for attempt in range(max_retries):
+            try:
+                return func()
+            except Exception as exc:
+                message = str(exc)
+                if "429" in message and attempt < max_retries - 1:
+                    wait_time = 2 ** attempt
+                    time.sleep(wait_time)
+                    continue
+                raise
+
+
     def build_index(self) -> int:
         """
         Construit l'index FAISS global à partir du corpus documentaire.
@@ -277,10 +294,29 @@ Contexte :
 
         docs_for_index = self._build_docs_for_vector_index(self.documents)
 
-        self.vectorstore = FAISS.from_documents(
-            documents=docs_for_index,
-            embedding=self.embeddings,
-        )
+        batch_size = 32
+        pause_seconds = 0.3
+        vectorstore = None
+
+        for i in range(0, len(docs_for_index), batch_size):
+            batch = docs_for_index[i : i + batch_size]
+
+            if vectorstore is None:
+                vectorstore = self._execute_with_retry(
+                    lambda: FAISS.from_documents(
+                        documents=batch,
+                        embedding=self.embeddings,
+                    )
+                )
+            else:
+                self._execute_with_retry(
+                    lambda: vectorstore.add_documents(batch)
+                )
+
+            time.sleep(pause_seconds)
+
+        self.vectorstore = vectorstore
+
         self.index_dir.mkdir(parents=True, exist_ok=True)
         self.vectorstore.save_local(str(self.index_dir))
 
