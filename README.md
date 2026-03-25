@@ -284,7 +284,10 @@ Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement c
 </p>
 <p>
 Un exemple de structure de document :
-Document(
+</p>
+<p>
+    
+    Document(
     page_content="<fiche courte lisible pour le LLM contenant : >",
         "Titre : "
         "Description :"
