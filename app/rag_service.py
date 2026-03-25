@@ -1,36 +1,59 @@
 """
-Service principal du pipeline RAG.
+Service principal du pipeline RAG OpenAgenda.
 
-Ce module implémente la logique centrale du système de
-Retrieval-Augmented Generation appliqué à la recommandation
-d'événements culturels.
+Ce module orchestre le pipeline complet de recherche et de génération
+de réponses à partir d'événements OpenAgenda indexés dans FAISS.
 
-Le service repose sur trois briques complémentaires :
+Responsabilités principales
+---------------------------
+Cette classe pilote les grandes étapes du système :
 
-- un index vectoriel FAISS pour retrouver les documents les plus pertinents
-- une mémoire locale pour réutiliser certains échanges passés
-- un modèle de langage pour générer une réponse finale contextualisée
+- chargement ou reconstruction de l'index vectoriel global
+- chargement du corpus documentaire source
+- préfiltrage structuré des documents via FilterService
+- fallback de préfiltrage lorsque les contraintes sont trop strictes
+- recherche vectorielle sur le sous-corpus retenu
+- injection du score vectoriel dans les métadonnées
+- ranking métier via RetrievalService
+- contrôle final de cohérence documentaire
+- formatage du contexte pour le LLM
+- génération de la réponse finale
+- construction des objets API
+- écriture des traces JSONL
 
-Le déroulement général du pipeline suit les étapes suivantes :
+Philosophie du pipeline
+-----------------------
+Le service ne contient pas la logique métier fine du filtrage lexical
+ou du scoring métier. Ces responsabilités restent déléguées à :
 
-1. vérification d'un éventuel choix utilisateur basé sur la mémoire
-2. recherche d'une question déjà posée à l'identique
-3. récupération initiale de documents candidats dans l'index vectoriel
-4. extraction de filtres métier depuis la question
-5. filtrage et reranking des documents candidats
-6. construction d'un contexte combinant mémoire et documents
-7. génération de la réponse finale
-8. sauvegarde de l'échange dans la mémoire locale
+- FilterService
+- RetrievalService
 
-L'objectif est de conserver le contexte documentaire comme source
-principale d'information, tout en améliorant la pertinence du retrieval
-grâce à une logique métier simple fondée sur les métadonnées
-des événements.
+RAGService agit comme chef d'orchestre du pipeline. Il décide :
+- quand lancer les différentes briques
+- quand déclencher un fallback
+- quels documents transmettre au ranking
+- quels documents conserver pour la réponse finale
+
+Notes
+-----
+Deux représentations textuelles coexistent volontairement :
+
+- ``search_text`` :
+  texte riche destiné à l'embedding et à la recherche vectorielle
+- ``format_doc()`` :
+  fiche courte et structurée destinée au LLM
+
+Cette séparation permet :
+- un retrieval plus riche sémantiquement
+- un contexte plus compact et plus propre pour la génération
 """
+
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
+from typing import Any
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -38,303 +61,227 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 
-from app.document_service import (
-    doc_matches_filters,
-    extract_filters_from_question,
-    score_document,
-)
-from app.memory_service import MemoryService
+from app.config import DEFAULT_SCOPE, DEFAULT_ZONE, FAISS_INDEX_DIR
+from app.document_service import load_documents
+from app.filter_service import FilterService
+from app.retrieval_service import RetrievalService
 from app.schemas import AskResponse, RetrievedDocument
-
-
-# Racine du projet
-BASE_DIR = Path(__file__).resolve().parents[1]
-
-# Répertoires de données
-DATA_DIR = BASE_DIR / "data"
-INDEX_DIR = DATA_DIR / "index" / "faiss_index_openagenda"
+from app.trace_service import TraceService
 
 
 class RAGService:
     """
-    Service central du pipeline RAG.
+    Service principal du pipeline RAG.
 
-    Cette classe orchestre les différentes étapes du système :
-    indexation, recherche documentaire, génération de réponse
-    et gestion d'une mémoire conversationnelle locale.
+    Cette classe orchestre l'ensemble du flux de traitement :
 
-    Elle s'appuie sur :
-    - un stockage vectoriel FAISS pour la recherche sémantique
-    - un service de mémoire locale pour réutiliser certains échanges
-    - un modèle de langage pour produire la réponse finale
-    - un ensemble de fonctions documentaires pour filtrer et reranker
-      les événements en fonction de la question
+    1. disponibilité des documents et de l'index
+    2. préfiltrage structuré
+    3. fallback éventuel si le filtrage est trop dur
+    4. recherche vectorielle locale
+    5. ranking métier
+    6. contrôle final des documents
+    7. génération de la réponse
+    8. traçage complet du pipeline
 
-    Parameters
-    ----------
-    documents : list[Document] | None, default=None
-        Liste initiale de documents à indexer.
-    index_dir : str | Path, default=INDEX_DIR
-        Répertoire contenant l'index vectoriel FAISS.
-    embedding_model : str, default="mistral-embed"
-        Modèle utilisé pour générer les embeddings.
-    llm_model : str, default="mistral-small-latest"
-        Modèle de langage utilisé pour la génération de réponses.
-    temperature : float, default=0.2
-        Température utilisée par le modèle de langage.
-    default_k : int, default=3
-        Nombre de documents retournés par défaut après reranking.
-    initial_fetch_k : int, default=10
-        Nombre initial de documents candidats récupérés avant filtrage
-        et reranking.
+    Le service ne porte pas la logique métier détaillée du filtrage
+    ou du scoring. Il pilote uniquement le flux global.
     """
 
-    FALLBACK_NO_RESULT_MESSAGE = (
-        "Je ne trouve pas d'événement correspondant, je suis un assistant "
-        "qui ne peut vous conseiller que des événements culturels."
-    )
+    EMPTY_ANSWER = "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
 
     def __init__(
         self,
         documents: list[Document] | None = None,
-        index_dir: str | Path = INDEX_DIR,
+        index_dir: str | Path | None = None,
         embedding_model: str = "mistral-embed",
         llm_model: str = "mistral-small-latest",
-        temperature: float = 0.2,
-        default_k: int = 3,
-        initial_fetch_k: int = 10,
+        top_k_retrieval: int = 10,
+        top_k_final: int = 3,
+        zone: str = DEFAULT_ZONE,
+        scope: str = DEFAULT_SCOPE,
+        trace_enabled: bool = True,
+        trace_file: str | Path = "artifacts/rag_trace.jsonl",
     ) -> None:
+        """
+        Initialise le service RAG.
+
+        Parameters
+        ----------
+        documents : list[Document] | None, default=None
+            Corpus documentaire éventuellement déjà chargé.
+        index_dir : str | Path | None, default=None
+            Dossier local de stockage de l'index FAISS.
+        embedding_model : str, default="mistral-embed"
+            Modèle d'embedding utilisé.
+        llm_model : str, default="mistral-small-latest"
+            Modèle de génération utilisé.
+        top_k_retrieval : int, default=10
+            Nombre maximal de documents récupérés après recherche vectorielle.
+        top_k_final : int, default=3
+            Nombre maximal de documents conservés pour la réponse finale.
+        zone : str, default=DEFAULT_ZONE
+            Zone géographique principale du corpus.
+        scope : str, default=DEFAULT_SCOPE
+            Scope géographique principal du corpus.
+        trace_enabled : bool, default=True
+            Active l'écriture des traces JSONL.
+        trace_file : str | Path, default="artifacts/rag_trace.jsonl"
+            Fichier cible pour les traces.
+        """
         self.documents = documents or []
-        self.index_dir = Path(index_dir)
-        self.default_k = default_k
-        self.initial_fetch_k = initial_fetch_k
+        self.index_dir = Path(index_dir) if index_dir else FAISS_INDEX_DIR
+        self.top_k_retrieval = top_k_retrieval
+        self.top_k_final = top_k_final
+        self.zone = zone
+        self.scope = scope
 
-        # Modèle d'embedding utilisé pour vectoriser les documents.
         self.embeddings = MistralAIEmbeddings(model=embedding_model)
-
-        # Modèle de langage utilisé pour générer la réponse finale.
         self.llm = ChatMistralAI(
             model=llm_model,
-            temperature=temperature,
+            temperature=0.2,
         )
 
-        # Service de mémoire conversationnelle locale.
-        self.memory_service = MemoryService()
-
-        # Stockage vectoriel FAISS chargé en mémoire à la demande.
         self.vectorstore: FAISS | None = None
 
-        # Prompt principal transmis au modèle de langage.
+        self.filter_service = FilterService()
+        self.retrieval_service = RetrievalService()
+        self.trace_service = TraceService(
+            trace_file=trace_file,
+            enabled=trace_enabled,
+        )
+
         self.prompt = ChatPromptTemplate.from_template(
             """
-Tu es un assistant spécialisé dans la recommandation d'événements culturels.
+Tu es un assistant spécialisé dans les événements culturels.
 
-Date actuelle : {current_date}
+Tu réponds uniquement à partir des documents fournis dans le contexte.
+Tu ne dois jamais inventer d'événement.
 
-Tu dois répondre uniquement à partir du CONTEXTE DOCUMENTAIRE fourni.
+Consignes de réponse :
+- Si aucun document pertinent n'est disponible, réponds exactement :
+  "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
 
---- 
+- Les dates doivent toujours être sous la forme AAAA/MM/JJ.
+- Les intervalles de dates doivent toujours être sous la forme AAAA/MM/JJ au AAAA/MM/JJ.
 
-RÈGLES STRICTES :
+- Si des documents pertinents sont disponibles, réponds toujours et uniquement sous la forme :
+Liste d'événements pour {question} :
+- Titre de l'événement (date : ..., lieu : ...)
+- Titre de l'événement (date : ..., lieu : ...)
 
-- Utilise uniquement les informations présentes dans le contexte
-- Ne fais aucune interprétation
-- Ne donne aucun avis
-- N'ajoute aucune information
-- Ne reformule pas de manière créative
-
---- 
-
-VALIDATION :
-
-- Un événement est valide s'il correspond à la question
-- Si aucune correspondance : réponds avec le message de refus
-
---- 
-
-FORMAT OBLIGATOIRE :
-
-Liste d'événements :
-
-- <titre> (date : <date>, lieu : <lieu>)
-
---- 
-
-CAS DE REFUS :
-
-"Je n'ai trouvé aucun événement correspondant dans les données disponibles."
-
---- 
+Tu ne dois pas ajouter d'introduction, de conclusion, ni de commentaire.
+Tu dois rester strictement fidèle au contexte.
+Tu ne dois jamais mentionner d'événement absent du contexte.
 
 Question :
 {question}
 
 Contexte :
 {context}
-"""
+""".strip()
         )
 
-        # Chaîne complète : prompt -> modèle -> sortie texte.
         self.chain = self.prompt | self.llm | StrOutputParser()
 
-    def _get_current_date(self) -> str:
+    # ------------------------------------------------------------------
+    # Gestion de l'index et des documents
+    # ------------------------------------------------------------------
+
+    def is_index_loaded(self) -> bool:
         """
-        Retourne la date actuelle au format YYYY-MM-DD.
-
-        Cette date est injectée dans le prompt afin de permettre
-        l'interprétation correcte des expressions temporelles
-        relatives comme "aujourd'hui", "demain" ou "ce week-end".
-
-        Returns
-        -------
-        str
-            Date actuelle au format YYYY-MM-DD.
+        Indique si l'index vectoriel global est chargé en mémoire.
         """
-        return datetime.today().strftime("%Y-%m-%d")
-
-    def _normalize_k(self, k: int | None) -> int:
-        """
-        Normalise le nombre de documents à retourner.
-
-        Parameters
-        ----------
-        k : int | None
-            Nombre demandé par l'appelant.
-
-        Returns
-        -------
-        int
-            Valeur finale strictement positive.
-        """
-        final_k = self.default_k if k is None else k
-        return max(1, final_k)
-
-    def _ensure_vectorstore_available(self) -> FAISS:
-        """
-        Garantit que le vectorstore est disponible en mémoire.
-
-        Returns
-        -------
-        FAISS
-            Index vectoriel prêt à être utilisé.
-
-        Raises
-        ------
-        RuntimeError
-            Si le vectorstore reste indisponible après initialisation.
-        """
-        self.ensure_index_ready()
-
-        if self.vectorstore is None:
-            raise RuntimeError(
-                "Le vectorstore n'est pas disponible après initialisation."
-            )
-
-        return self.vectorstore
-
-    def _build_ask_response(
-        self,
-        question: str,
-        answer: str,
-        documents: list[RetrievedDocument],
-    ) -> AskResponse:
-        """
-        Construit un objet de réponse API standardisé.
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        answer : str
-            Réponse finale.
-        documents : list[RetrievedDocument]
-            Documents retournés.
-
-        Returns
-        -------
-        AskResponse
-            Réponse complète sérialisable.
-        """
-        return AskResponse(
-            question=question,
-            answer=answer,
-            n_docs=len(documents),
-            documents=documents,
-        )
-
-    def _save_interaction_in_memory(
-        self,
-        question: str,
-        answer: str,
-        documents: list[RetrievedDocument],
-    ) -> None:
-        """
-        Sauvegarde une interaction dans la mémoire locale.
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        answer : str
-            Réponse produite.
-        documents : list[RetrievedDocument]
-            Documents associés à la réponse.
-        """
-        self.memory_service.add_entry(
-            question=question,
-            answer=answer,
-            documents=[doc.model_dump() for doc in documents],
-        )
+        return self.vectorstore is not None
 
     def set_documents(self, documents: list[Document]) -> None:
         """
-        Définit la liste de documents utilisée par le service.
-
-        Cette méthode permet de remplacer les documents actuellement
-        stockés dans le service, par exemple après un rechargement
-        ou une reconstruction de l'index.
-
-        Parameters
-        ----------
-        documents : list[Document]
-            Documents LangChain à utiliser.
+        Remplace les documents actuellement stockés dans le service.
         """
         self.documents = documents
 
-    def build_index(self, documents: list[Document] | None = None) -> int:
+    def _ensure_documents_loaded(self) -> None:
         """
-        Construit l'index vectoriel FAISS à partir des documents disponibles.
+        Recharge le corpus documentaire source si nécessaire.
 
-        Si une liste de documents est fournie, elle remplace d'abord
-        les documents actuellement stockés dans le service.
-
-        Cette opération génère les embeddings puis sauvegarde l'index
-        sur disque dans le répertoire configuré.
-
-        Parameters
-        ----------
-        documents : list[Document] | None, default=None
-            Documents à indexer. Si None, utilise les documents déjà chargés.
-
-        Returns
-        -------
-        int
-            Nombre de documents indexés.
-
-        Raises
-        ------
-        ValueError
-            Si aucun document n'est disponible pour construire l'index.
+        Même si un index FAISS existe déjà, le corpus source reste utile,
+        car le pipeline applique ensuite un préfiltrage structuré avant
+        de lancer une recherche vectorielle locale.
         """
-        if documents is not None:
-            self.documents = documents
+        if self.documents:
+            return
+
+        self.documents = load_documents(
+            zone=self.zone,
+            scope=self.scope,
+        )
+
+    def ensure_index_ready(self) -> None:
+        """
+        S'assure que le corpus documentaire et l'index FAISS sont disponibles.
+
+        Comportement :
+        - si l'index est déjà chargé en mémoire, rien à faire
+        - si un index existe sur disque, il est chargé
+        - sinon, il est reconstruit à partir des documents disponibles
+        """
+        if self.vectorstore is not None:
+            self._ensure_documents_loaded()
+            return
+
+        if self.index_dir.exists() and any(self.index_dir.iterdir()):
+            self.load_index()
+            self._ensure_documents_loaded()
+            return
 
         if not self.documents:
-            raise ValueError("Aucun document disponible pour construire l'index.")
+            self._ensure_documents_loaded()
 
+        if not self.documents:
+            raise ValueError(
+                "Aucun index FAISS disponible et aucun document fourni pour le construire."
+            )
+
+        self.build_index()
+
+    def _build_docs_for_vector_index(self, docs: list[Document]) -> list[Document]:
+        """
+        Construit une version des documents adaptée à l'indexation vectorielle.
+
+        L'index vectoriel travaille de préférence sur `search_text`,
+        plus riche que le contenu court destiné au LLM.
+        """
+        docs_for_index: list[Document] = []
+
+        for doc in docs:
+            md = dict(doc.metadata or {})
+            search_text = md.get("search_text", "") or doc.page_content
+
+            docs_for_index.append(
+                Document(
+                    page_content=search_text,
+                    metadata=md,
+                )
+            )
+
+        return docs_for_index
+
+    def build_index(self) -> int:
+        """
+        Construit l'index FAISS global à partir du corpus documentaire.
+        """
+        if not self.documents:
+            raise ValueError(
+                "Impossible de construire l'index : aucun document n'est disponible."
+            )
+
+        docs_for_index = self._build_docs_for_vector_index(self.documents)
+
+        self.vectorstore = FAISS.from_documents(
+            documents=docs_for_index,
+            embedding=self.embeddings,
+        )
         self.index_dir.mkdir(parents=True, exist_ok=True)
-
-        self.vectorstore = FAISS.from_documents(self.documents, self.embeddings)
         self.vectorstore.save_local(str(self.index_dir))
 
         return len(self.documents)
@@ -342,378 +289,560 @@ Contexte :
     def load_index(self) -> None:
         """
         Charge un index FAISS existant depuis le disque.
-
-        Cette méthode permet de réutiliser un index déjà construit
-        sans recalculer les embeddings des documents.
-
-        Raises
-        ------
-        FileNotFoundError
-            Si le répertoire de l'index n'existe pas.
         """
-        if not self.index_dir.exists():
+        if not self.index_dir.exists() or not any(self.index_dir.iterdir()):
             raise FileNotFoundError(
-                f"Index introuvable dans '{self.index_dir}'."
+                f"Index FAISS introuvable dans le dossier : {self.index_dir}"
             )
 
         self.vectorstore = FAISS.load_local(
-            str(self.index_dir),
-            self.embeddings,
+            folder_path=str(self.index_dir),
+            embeddings=self.embeddings,
             allow_dangerous_deserialization=True,
         )
 
-    def ensure_index_ready(self) -> None:
+    def rebuild_index(self, documents: list[Document]) -> int:
         """
-        Vérifie que l'index vectoriel est prêt à être utilisé.
-
-        Si l'index n'est pas encore chargé en mémoire, il est
-        automatiquement chargé depuis le disque ou reconstruit
-        à partir des documents déjà disponibles.
-
-        Raises
-        ------
-        FileNotFoundError
-            Si aucun index n'est disponible et qu'aucun document
-            n'est présent pour le reconstruire.
+        Reconstruit complètement l'index FAISS global.
         """
-        if self.vectorstore is None:
-            if self.index_dir.exists():
-                self.load_index()
-            elif self.documents:
-                self.build_index()
-            else:
-                raise FileNotFoundError(
-                    f"Index introuvable dans '{self.index_dir}' et aucun document disponible pour le reconstruire."
-                )
+        self.set_documents(documents)
+        return self.build_index()
 
-    def retrieve(self, question: str, k: int | None = None) -> list[Document]:
+    def _build_local_vectorstore(self, docs: list[Document]) -> FAISS:
         """
-        Récupère les documents les plus pertinents pour une question.
+        Construit un index FAISS local temporaire sur un sous-ensemble
+        de documents préfiltrés.
+        """
+        docs_for_index = self._build_docs_for_vector_index(docs)
 
-        La méthode suit une logique en plusieurs étapes :
+        return FAISS.from_documents(
+            documents=docs_for_index,
+            embedding=self.embeddings,
+        )
 
-        1. récupération initiale de documents candidats via la recherche sémantique
-        2. extraction de filtres métier depuis la question
-        3. filtrage des documents incompatibles avec la requête
-        4. reranking des documents restants
-        5. retour des `k` meilleurs documents
+    # ------------------------------------------------------------------
+    # Sérialisation / debug
+    # ------------------------------------------------------------------
 
-        Si le filtrage s'avère trop strict et élimine tous les candidats,
-        le service retombe sur les résultats bruts issus du moteur vectoriel.
+    def _serialize_for_json(self, value: Any) -> Any:
+        """
+        Convertit récursivement une structure Python en structure JSON-safe.
 
-        Parameters
-        ----------
-        question : str
-            Question posée par l'utilisateur.
-        k : int | None, default=None
-            Nombre de documents à retourner. Si None, utilise `default_k`.
+        Utile pour :
+        - les traces JSONL
+        - les réponses debug
+        - la sérialisation des objets date / datetime
+        """
+        if isinstance(value, (date, datetime)):
+            return value.isoformat()
+
+        if isinstance(value, dict):
+            return {
+                str(key): self._serialize_for_json(val)
+                for key, val in value.items()
+            }
+
+        if isinstance(value, (list, tuple, set)):
+            return [self._serialize_for_json(item) for item in value]
+
+        return value
+
+    def _sanitize_filter_debug(self, debug_data: dict[str, Any] | None) -> dict[str, Any] | None:
+        """
+        Nettoie une structure de debug issue du FilterService pour la rendre
+        stable et sérialisable.
+        """
+        if debug_data is None:
+            return None
+
+        return {
+            "filters": self._serialize_for_json(debug_data.get("filters", {})),
+            "n_input_docs": debug_data.get("n_input_docs", 0),
+            "n_after_city": debug_data.get("n_after_city", 0),
+            "n_after_type": debug_data.get("n_after_type", 0),
+            "n_after_music": debug_data.get("n_after_music", 0),
+            "n_after_cultural": debug_data.get("n_after_cultural", 0),
+            "n_after_audience": debug_data.get("n_after_audience", 0),
+            "n_after_duration": debug_data.get("n_after_duration", 0),
+            "n_after_date": debug_data.get("n_after_date", 0),
+            "n_after_price": debug_data.get("n_after_price", 0),
+        }
+
+    # ------------------------------------------------------------------
+    # Helpers de trace
+    # ------------------------------------------------------------------
+
+    def _doc_to_trace_row(self, doc: Document) -> dict[str, Any]:
+        """
+        Convertit un document en structure légère pour le traçage JSONL.
+        """
+        md = doc.metadata or {}
+
+        return {
+            "title": md.get("title", ""),
+            "location_name": md.get("location_name", ""),
+            "city": md.get("city", ""),
+            "region": md.get("region", ""),
+            "first_date": md.get("first_date", ""),
+            "last_date": md.get("last_date", ""),
+            "event_type": md.get("canonical_event_type", "") or md.get("event_type", ""),
+            "music_genre": md.get("music_genre", ""),
+            "price_info": md.get("price_info", ""),
+            "is_free": md.get("is_free"),
+            "vector_score": md.get("vector_score"),
+            "final_score": md.get("final_score"),
+            "diversified_score": md.get("diversified_score"),
+            "url": md.get("source_url", "") or md.get("url", ""),
+        }
+
+    def _trace_pipeline(
+        self,
+        *,
+        question: str,
+        filter_debug: dict[str, Any],
+        fallback_filter_debug: dict[str, Any] | None,
+        prefiltered_docs: list[Document],
+        raw_docs: list[Document],
+        ranked_docs: list[Document],
+        final_docs: list[Document],
+        context: str,
+        answer: str,
+        fallback_used: bool,
+    ) -> None:
+        """
+        Écrit une trace JSONL complète du pipeline.
+
+        La trace permet de rejouer mentalement le pipeline :
+        corpus d'entrée → préfiltrage → retrieval → ranking → réponse.
+        """
+        payload = {
+            "question": question,
+            "zone": self.zone,
+            "scope": self.scope,
+            "top_k_retrieval": self.top_k_retrieval,
+            "top_k_final": self.top_k_final,
+            "fallback_used": fallback_used,
+            "n_input_docs": len(self.documents),
+            "n_prefiltered_docs": len(prefiltered_docs),
+            "n_raw_docs": len(raw_docs),
+            "n_ranked_docs": len(ranked_docs),
+            "n_final_docs": len(final_docs),
+            "filter_debug": self._sanitize_filter_debug(filter_debug),
+            "fallback_filter_debug": self._sanitize_filter_debug(fallback_filter_debug),
+            "prefiltered_docs": [self._doc_to_trace_row(doc) for doc in prefiltered_docs[:50]],
+            "raw_docs": [self._doc_to_trace_row(doc) for doc in raw_docs[:50]],
+            "ranked_docs": [self._doc_to_trace_row(doc) for doc in ranked_docs[:50]],
+            "final_docs": [self._doc_to_trace_row(doc) for doc in final_docs[:50]],
+            "context": context,
+            "answer": answer,
+        }
+
+        self.trace_service.write_trace(self._serialize_for_json(payload))
+
+    # ------------------------------------------------------------------
+    # Retrieval interne
+    # ------------------------------------------------------------------
+
+    def _attach_vector_scores(
+        self,
+        results: list[tuple[Document, float]],
+    ) -> list[Document]:
+        """
+        Injecte le score vectoriel FAISS dans les métadonnées des documents.
+        """
+        docs: list[Document] = []
+
+        for doc, score in results:
+            if doc.metadata is None:
+                doc.metadata = {}
+
+            doc.metadata["vector_score"] = float(score)
+            docs.append(doc)
+
+        return docs
+
+    def _is_reliable_document(self, doc: Document) -> bool:
+        """
+        Vérifie qu'un document possède un minimum d'information utile.
+
+        Ce garde-fou évite d'envoyer au LLM des documents trop pauvres,
+        même s'ils ont survécu au ranking.
+        """
+        md = doc.metadata or {}
+
+        has_title = bool(md.get("title"))
+        has_date = bool(md.get("first_date"))
+        has_location = bool(md.get("location_name") or md.get("city"))
+        has_url = bool(md.get("source_url") or md.get("url"))
+        content_quality = md.get("content_quality", 0)
+
+        try:
+            content_quality = int(content_quality)
+        except (TypeError, ValueError):
+            content_quality = 0
+
+        return has_title and has_date and has_location and (has_url or content_quality >= 4)
+
+    def _post_filter_ranked_docs(self, docs: list[Document]) -> list[Document]:
+        """
+        Applique un dernier contrôle léger après le ranking métier.
+
+        On privilégie les documents réellement exploitables par le LLM.
+        """
+        if not docs:
+            return []
+
+        reliable_docs = [doc for doc in docs if self._is_reliable_document(doc)]
+
+        if reliable_docs:
+            return reliable_docs[: self.top_k_final]
+
+        return docs[: self.top_k_final]
+
+    def _run_vector_retrieval(self, question: str, candidate_docs: list[Document]) -> list[Document]:
+        """
+        Lance la recherche vectorielle sur un sous-corpus préfiltré.
 
         Returns
         -------
         list[Document]
-            Liste des documents jugés les plus pertinents.
-
-        Raises
-        ------
-        ValueError
-            Si la question est vide.
+            Documents enrichis avec leur score vectoriel.
         """
-        if not question or not question.strip():
-            raise ValueError("La question ne peut pas être vide.")
-
-        final_k = self._normalize_k(k)
-        initial_k = max(self.initial_fetch_k, final_k * 3)
-
-        vectorstore = self._ensure_vectorstore_available()
-
-        # Première récupération large de documents candidats.
-        raw_docs = vectorstore.similarity_search(
-            question.strip(),
-            k=initial_k,
-        )
-
-        if not raw_docs:
+        if not candidate_docs:
             return []
 
-        # Extraction de filtres métier à partir de la question
-        # et des métadonnées connues dans les documents candidats.
-        filters = extract_filters_from_question(
+        local_vectorstore = self._build_local_vectorstore(candidate_docs)
+
+        raw_results = local_vectorstore.similarity_search_with_score(
+            query=question,
+            k=min(self.top_k_retrieval, len(candidate_docs)),
+        )
+
+        if not raw_results:
+            return []
+
+        return self._attach_vector_scores(raw_results)
+
+    def _build_relaxed_question(self, question: str) -> str:
+        """
+        Construit une version plus souple de la question pour un fallback.
+        """
+        return question.strip()
+
+    def _prefilter_with_fallback(
+        self,
+        question: str,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None, list[Document], bool]:
+        """
+        Préfiltre les documents avec une stratégie de fallback progressive.
+
+        Stratégie :
+        1. filtrage normal avec ville par défaut
+        2. si aucun document, second essai sans ville par défaut
+        3. si aucun document encore, on garde le résultat vide
+
+        Returns
+        -------
+        tuple
+            (
+                filter_debug_principal,
+                filter_debug_fallback_ou_none,
+                docs_prefiltres,
+                fallback_used
+            )
+        """
+        filter_debug = self.filter_service.filter_documents_with_debug(
             question=question,
-            documents=raw_docs if raw_docs else self.documents,
+            docs=self.documents,
+            default_city=self.zone,
         )
 
-        # Filtrage documentaire fondé sur les métadonnées.
-        filtered_docs = [
-            doc for doc in raw_docs
-            if doc_matches_filters(doc, filters)
-        ]
+        prefiltered_docs = filter_debug.get("docs", [])
+        if prefiltered_docs:
+            return filter_debug, None, prefiltered_docs, False
 
-        # Si le filtrage est trop strict, on conserve les documents bruts.
-        candidate_docs = filtered_docs if filtered_docs else raw_docs
-
-        # Reranking métier des documents conservés.
-        ranked_docs = sorted(
-            candidate_docs,
-            key=lambda doc: score_document(question, doc, filters),
-            reverse=True,
+        fallback_question = self._build_relaxed_question(question)
+        fallback_filter_debug = self.filter_service.filter_documents_with_debug(
+            question=fallback_question,
+            docs=self.documents,
+            default_city=None,
         )
 
-        return ranked_docs[:final_k]
+        fallback_docs = fallback_filter_debug.get("docs", [])
+        if fallback_docs:
+            return filter_debug, fallback_filter_debug, fallback_docs, True
+
+        return filter_debug, fallback_filter_debug, [], True
+
+    # ------------------------------------------------------------------
+    # API retrieval
+    # ------------------------------------------------------------------
+
+    def retrieve(self, question: str) -> list[Document]:
+        """
+        Récupère les documents finaux les plus pertinents pour une question.
+
+        Ce helper expose uniquement les documents retenus après :
+        préfiltrage, recherche vectorielle, ranking métier et contrôle final.
+        """
+        if not question or not question.strip():
+            raise ValueError("La question utilisateur ne peut pas être vide.")
+
+        result = self._run_pipeline(question)
+        return result["docs"]
+
+    # ------------------------------------------------------------------
+    # Formatage du contexte
+    # ------------------------------------------------------------------
+
+    def format_doc(self, doc: Document, index: int | None = None) -> str:
+        """
+        Formate un document unique sous forme de fiche courte pour le LLM.
+
+        Le contexte transmis au modèle doit rester :
+        - court
+        - factuel
+        - lisible
+        - centré sur les informations réellement utiles à la réponse
+        """
+        md = doc.metadata or {}
+
+        lines: list[str] = []
+
+        if index is not None:
+            lines.append(f"Événement {index}")
+
+        lines.extend(
+            [
+                f"Titre : {md.get('title', '')}",
+                f"Lieu : {md.get('location_name', '')}",
+                f"Ville : {md.get('city', '')}",
+                f"Région : {md.get('region', '')}",
+                f"Date de début : {md.get('first_date', '')}",
+                f"Date de fin : {md.get('last_date', '')}",
+                f"Type : {md.get('canonical_event_type', '') or md.get('event_type', '')}",
+                f"Genre musical : {md.get('music_genre', '')}",
+                f"Tarification : {md.get('price_info', '')}",
+                f"Description : {md.get('description', '')}",
+                f"URL : {md.get('source_url', '') or md.get('url', '')}",
+            ]
+        )
+
+        return "\n".join(lines)
 
     def format_docs(self, docs: list[Document]) -> str:
         """
-        Formate les documents récupérés en un contexte textuel structuré.
-
-        Chaque document est transformé en bloc lisible contenant
-        ses principales métadonnées ainsi que son contenu textuel.
-
-        Parameters
-        ----------
-        docs : list[Document]
-            Documents à formater.
-
-        Returns
-        -------
-        str
-            Contexte documentaire prêt à être injecté dans le prompt.
+        Formate les documents retenus en un bloc texte unique pour le LLM.
         """
         if not docs:
-            return "Aucun événement trouvé."
+            return ""
 
-        blocks = []
+        return "\n\n".join(
+            self.format_doc(doc, idx)
+            for idx, doc in enumerate(docs, start=1)
+        )
 
-        for i, doc in enumerate(docs, start=1):
-            md = doc.metadata or {}
-
-            content = str(doc.page_content).strip()
-            block = "\n".join(
-                [
-                    f"Événement {i}",
-                    f"Titre : {md.get('title', '')}",
-                    f"Lieu : {md.get('location_name', '')}",
-                    f"Ville : {md.get('city', '')}",
-                    f"Région : {md.get('region', '')}",
-                    f"Date de début : {md.get('first_date', '')}",
-                    f"Date de fin : {md.get('last_date', '')}",
-                    f"Type : {md.get('event_type', '')}",
-                    f"URL : {md.get('url', '')}",
-                    f"Contenu : {content}",
-                ]
-            )
-            blocks.append(block.strip())
-
-        return "\n\n".join(blocks)
-
-    def build_full_context(self, question: str, docs: list[Document]) -> dict[str, str]:
+    def format_docs_list(self, docs: list[Document]) -> list[str]:
         """
-        Construit le contexte complet transmis au modèle de langage.
+        Formate séparément chaque document.
 
-        Ce contexte combine :
-        - le contexte documentaire issu des documents récupérés
-        - un contexte mémoire issu des échanges passés
-
-        Si aucun souvenir pertinent n'est disponible, un message
-        par défaut est utilisé.
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        docs : list[Document]
-            Documents retrouvés par le moteur de recherche.
-
-        Returns
-        -------
-        dict[str, str]
-            Dictionnaire contenant :
-            - `context` : contexte documentaire
-            - `memory_context` : contexte mémoire
-        """
-        context = self.format_docs(docs)
-        memory_context = self.memory_service.build_memory_context(question=question)
-
-        if not memory_context:
-            memory_context = "Aucun souvenir pertinent trouvé."
-
-        return {
-            "context": context,
-            "memory_context": memory_context,
-        }
-
-    def generate(
-        self,
-        question: str,
-        docs: list[Document],
-        current_date: str,
-    ) -> str:
-        """
-        Génère une réponse à partir de la question et des documents récupérés.
-
-        La réponse finale s'appuie sur les documents retrouvés dans
-        l'index ainsi que, si besoin, sur un rappel mémoire léger.
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        docs : list[Document]
-            Documents récupérés dans l'index.
-        current_date : str
-            Date actuelle au format YYYY-MM-DD, utilisée pour interpréter
-            les contraintes temporelles relatives dans la question.
-
-        Returns
-        -------
-        str
-            Réponse générée par le modèle de langage.
+        Utile pour le debug, l'évaluation et les inspections fines.
         """
         if not docs:
-            return self.FALLBACK_NO_RESULT_MESSAGE
+            return []
 
-        full_context = self.build_full_context(question=question, docs=docs)
-
-        return self.chain.invoke(
-            {
-                "question": question.strip(),
-                "context": full_context["context"],
-                "memory_context": full_context["memory_context"],
-                "current_date": current_date,
-            }
-        )
-
-    def to_retrieved_document(self, doc: Document) -> RetrievedDocument:
-        """
-        Convertit un document LangChain en objet de réponse API.
-
-        Cette conversion permet de ne conserver que les champs utiles
-        pour la sérialisation et l'affichage côté API ou interface.
-
-        Parameters
-        ----------
-        doc : Document
-            Document LangChain à convertir.
-
-        Returns
-        -------
-        RetrievedDocument
-            Représentation sérialisable du document.
-        """
-        metadata = doc.metadata or {}
-
-        return RetrievedDocument(
-            title=metadata.get("title", ""),
-            location_name=metadata.get("location_name", ""),
-            city=metadata.get("city", ""),
-            region=metadata.get("region", ""),
-            first_date=metadata.get("first_date", ""),
-            last_date=metadata.get("last_date", ""),
-            event_type=metadata.get("event_type", ""),
-            url=metadata.get("url", ""),
-            score=None,
-        )
-
-    def ask(self, question: str, k: int | None = None) -> AskResponse:
-        """
-        Exécute le pipeline complet de question-réponse.
-
-        Le traitement suit les étapes suivantes :
-        1. vérification d'une éventuelle référence à un choix précédent
-        2. recherche d'une question identique déjà présente en mémoire
-        3. retrieval documentaire avec filtrage et reranking
-        4. génération de la réponse
-        5. sauvegarde du nouvel échange en mémoire
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        k : int | None, default=None
-            Nombre de documents à récupérer.
-
-        Returns
-        -------
-        AskResponse
-            Réponse complète contenant :
-            - la question
-            - la réponse générée
-            - le nombre de documents utilisés
-            - les documents retournés
-
-        Raises
-        ------
-        ValueError
-            Si la question est vide.
-        """
-        question = question.strip()
-
-        if not question:
-            raise ValueError("La question ne peut pas être vide.")
-
-        current_date = self._get_current_date()
-
-        # Cas 1 : l'utilisateur fait référence à un choix précédent.
-        choice_result = self.memory_service.build_choice_answer(question)
-        if choice_result is not None:
-            choice_docs = [
-                RetrievedDocument(**doc_data)
-                for doc_data in choice_result.get("documents", [])
-            ]
-
-            return self._build_ask_response(
-                question=question,
-                answer=choice_result.get("answer", ""),
-                documents=choice_docs,
-            )
-
-        # Cas 2 : la même question existe déjà dans la mémoire.
-        exact_memory = self.memory_service.find_exact_question(question)
-        if exact_memory:
-            memory_docs = [
-                RetrievedDocument(**doc_data)
-                for doc_data in exact_memory.get("documents", [])
-            ]
-
-            return self._build_ask_response(
-                question=question,
-                answer=exact_memory.get("answer", ""),
-                documents=memory_docs,
-            )
-
-        # Cas 3 : exécution normale du pipeline RAG.
-        docs = self.retrieve(question=question, k=k)
-        answer = self.generate(
-            question=question,
-            docs=docs,
-            current_date=current_date,
-        )
-
-        retrieved_docs = [
-            self.to_retrieved_document(doc)
-            for doc in docs
+        return [
+            self.format_doc(doc, idx)
+            for idx, doc in enumerate(docs, start=1)
         ]
 
-        response = self._build_ask_response(
-            question=question,
-            answer=answer,
-            documents=retrieved_docs,
+    # ------------------------------------------------------------------
+    # Conversion API
+    # ------------------------------------------------------------------
+
+    def _build_retrieved_document(self, doc: Document) -> RetrievedDocument:
+        """
+        Convertit un document LangChain en objet structuré pour l'API.
+        """
+        md = doc.metadata or {}
+
+        raw_score = md.get("final_score", md.get("vector_score"))
+        try:
+            score = float(raw_score) if raw_score is not None else None
+        except (TypeError, ValueError):
+            score = None
+
+        return RetrievedDocument(
+            title=md.get("title", ""),
+            location_name=md.get("location_name", ""),
+            city=md.get("city", ""),
+            region=md.get("region", ""),
+            first_date=md.get("first_date", ""),
+            last_date=md.get("last_date", ""),
+            event_type=md.get("canonical_event_type", "") or md.get("event_type", ""),
+            url=md.get("source_url", "") or md.get("url", ""),
+            price_info=md.get("price_info", ""),
+            is_free=md.get("is_free"),
+            keywords_title=md.get("keywords_title", []),
+            score=score,
         )
 
-        # Sauvegarde de la nouvelle interaction dans la mémoire locale.
-        self._save_interaction_in_memory(
-            question=question,
-            answer=answer,
-            documents=retrieved_docs,
+    def build_retrieved_documents(
+        self,
+        docs: list[Document],
+    ) -> list[RetrievedDocument]:
+        """
+        Convertit les documents LangChain en objets structurés pour l'API.
+        """
+        return [self._build_retrieved_document(doc) for doc in docs]
+
+    # ------------------------------------------------------------------
+    # Génération
+    # ------------------------------------------------------------------
+
+    def generate_answer(self, question: str, docs: list[Document]) -> str:
+        """
+        Génère une réponse finale à partir de la question et des documents.
+
+        Si aucun document n'est disponible, le LLM n'est pas appelé.
+        """
+        if not docs:
+            return self.EMPTY_ANSWER
+
+        context = self.format_docs(docs).strip()
+        if not context:
+            return self.EMPTY_ANSWER
+
+        answer = self.chain.invoke({"question": question, "context": context})
+        answer = answer.strip()
+
+        return answer or self.EMPTY_ANSWER
+
+    # ------------------------------------------------------------------
+    # Pipeline complet
+    # ------------------------------------------------------------------
+
+    def _run_pipeline(self, question: str) -> dict[str, Any]:
+        """
+        Exécute le pipeline RAG complet et retourne toutes les données utiles.
+
+        Étapes
+        ------
+        1. validation de la question
+        2. disponibilité du corpus et de l'index
+        3. préfiltrage structuré
+        4. fallback éventuel du préfiltrage
+        5. recherche vectorielle locale
+        6. ranking métier
+        7. contrôle final documentaire
+        8. génération de réponse
+        9. traçage complet
+        """
+        if not question or not question.strip():
+            raise ValueError("La question utilisateur ne peut pas être vide.")
+
+        self.ensure_index_ready()
+
+        filter_debug, fallback_filter_debug, prefiltered_docs, fallback_used = (
+            self._prefilter_with_fallback(question)
         )
 
-        return response
+        raw_docs: list[Document] = []
+        ranked_docs: list[Document] = []
+        final_docs: list[Document] = []
 
-    def is_index_loaded(self) -> bool:
-        """
-        Indique si l'index vectoriel est chargé en mémoire.
+        if prefiltered_docs:
+            raw_docs = self._run_vector_retrieval(
+                question=question,
+                candidate_docs=prefiltered_docs,
+            )
 
-        Returns
-        -------
-        bool
-            `True` si l'index FAISS est disponible, sinon `False`.
+            if raw_docs:
+                ranked_docs = self.retrieval_service.rank_documents(
+                    question=question,
+                    raw_docs=raw_docs,
+                    top_k=min(self.top_k_retrieval, len(raw_docs)),
+                )
+
+                final_docs = self._post_filter_ranked_docs(ranked_docs)
+
+        context = self.format_docs(final_docs)
+        answer = self.generate_answer(question, final_docs)
+        retrieved_documents = self.build_retrieved_documents(final_docs)
+        retrieved_contexts = self.format_docs_list(final_docs)
+
+        self._trace_pipeline(
+            question=question,
+            filter_debug=filter_debug,
+            fallback_filter_debug=fallback_filter_debug,
+            prefiltered_docs=prefiltered_docs,
+            raw_docs=raw_docs,
+            ranked_docs=ranked_docs,
+            final_docs=final_docs,
+            context=context,
+            answer=answer,
+            fallback_used=fallback_used,
+        )
+
+        retrieval_debug = self.retrieval_service.rank_documents_with_scores(
+            question=question,
+            raw_docs=raw_docs,
+            top_k=len(raw_docs) if raw_docs else self.top_k_final,
+        )
+
+        return {
+            "question": question,
+            "answer": answer,
+            "docs": final_docs,
+            "retrieved_documents": retrieved_documents,
+            "retrieved_contexts": retrieved_contexts,
+            "filter_debug": self._sanitize_filter_debug(filter_debug),
+            "fallback_filter_debug": self._sanitize_filter_debug(fallback_filter_debug),
+            "fallback_used": fallback_used,
+            "retrieval_debug": self._serialize_for_json(retrieval_debug),
+        }
+
+    def ask(self, question: str) -> AskResponse:
         """
-        return self.vectorstore is not None
+        Exécute le pipeline RAG complet pour une question utilisateur.
+        """
+        result = self._run_pipeline(question)
+
+        return AskResponse(
+            question=result["question"],
+            answer=result["answer"],
+            n_docs=len(result["docs"]),
+            documents=result["retrieved_documents"],
+        )
+
+    def ask_debug(self, question: str) -> dict[str, Any]:
+        """
+        Exécute le pipeline complet avec des informations de debug détaillées.
+
+        Ce mode permet notamment d'inspecter :
+        - les documents finaux
+        - les contextes envoyés au LLM
+        - les étapes du filtrage
+        - le fallback éventuel
+        - les scores métier du ranking
+        """
+        result = self._run_pipeline(question)
+
+        response = {
+            "question": result["question"],
+            "answer": result["answer"],
+            "n_docs": len(result["docs"]),
+            "documents": [
+                doc.model_dump() if hasattr(doc, "model_dump") else doc.dict()
+                for doc in result["retrieved_documents"]
+            ],
+            "retrieved_contexts": result["retrieved_contexts"],
+            "fallback_used": result["fallback_used"],
+            "filter_debug": result["filter_debug"],
+            "retrieval_debug": result["retrieval_debug"],
+        }
+
+        if result["fallback_filter_debug"] is not None:
+            response["fallback_filter_debug"] = result["fallback_filter_debug"]
+
+        return self._serialize_for_json(response)

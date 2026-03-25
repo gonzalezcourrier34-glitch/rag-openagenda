@@ -1,11 +1,232 @@
+from pathlib import Path
+
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from app.main import app
+from app.main import (
+    _initialize_rag_service,
+    _raise_http_from_exception,
+    app,
+)
 from app.security import require_api_key
 
 
 app.dependency_overrides[require_api_key] = lambda: "test-key"
 
+
+# -------------------------------------------------------------------------
+# Helpers
+# -------------------------------------------------------------------------
+
+class FakeRAGAsk:
+    def ask(self, question):
+        return {
+            "question": question,
+            "answer": "Réponse test",
+            "n_docs": 1,
+            "documents": [
+                {
+                    "title": "Expo test",
+                    "location_name": "Musée",
+                    "city": "Montpellier",
+                    "region": "Occitanie",
+                    "first_date": "2026-03-01",
+                    "last_date": "2026-03-01",
+                    "event_type": "Exposition",
+                    "url": "http://test.com",
+                    "price_info": "gratuit",
+                    "is_free": True,
+                    "keywords_title": [],
+                    "score": None,
+                }
+            ],
+        }
+
+
+class FakeRAGAskDebug:
+    def ask_debug(self, question):
+        return {
+            "question": question,
+            "answer": "Réponse debug",
+            "n_docs": 1,
+            "documents": [
+                {
+                    "title": "Expo test",
+                    "location_name": "Musée",
+                    "city": "Montpellier",
+                    "region": "Occitanie",
+                    "first_date": "2026-03-01",
+                    "last_date": "2026-03-01",
+                    "event_type": "Exposition",
+                    "url": "http://test.com",
+                    "price_info": "gratuit",
+                    "is_free": True,
+                    "keywords_title": [],
+                    "score": None,
+                }
+            ],
+            "retrieved_contexts": ["Contenu test"],
+            "fallback_used": False,
+            "filter_debug": {"filters": {}, "n_input_docs": 1},
+            "retrieval_debug": [],
+        }
+
+
+class FakeRAGHealth:
+    def is_index_loaded(self):
+        return True
+
+
+class FakeRAGRebuild:
+    def __init__(self):
+        self.zone = None
+        self.scope = None
+        self.documents = None
+
+    def rebuild_index(self, documents):
+        self.documents = documents
+        return 2
+
+
+# -------------------------------------------------------------------------
+# Helpers internes
+# -------------------------------------------------------------------------
+
+def test_raise_http_from_exception_file_not_found():
+    with pytest.raises(HTTPException) as exc_info:
+        _raise_http_from_exception(
+            FileNotFoundError("index absent"),
+            user_log_message="Erreur utilisateur",
+            server_log_message="Erreur serveur",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "index absent"
+
+
+def test_raise_http_from_exception_value_error():
+    with pytest.raises(HTTPException) as exc_info:
+        _raise_http_from_exception(
+            ValueError("question invalide"),
+            user_log_message="Erreur utilisateur",
+            server_log_message="Erreur serveur",
+        )
+
+    assert exc_info.value.status_code == 400
+    assert exc_info.value.detail == "question invalide"
+
+
+def test_raise_http_from_exception_unexpected():
+    with pytest.raises(HTTPException) as exc_info:
+        _raise_http_from_exception(
+            RuntimeError("boom"),
+            user_log_message="Erreur utilisateur",
+            server_log_message="Erreur serveur",
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == "Erreur interne du serveur."
+
+
+# -------------------------------------------------------------------------
+# Initialisation
+# -------------------------------------------------------------------------
+
+def test_initialize_rag_service_returns_when_already_loaded(monkeypatch):
+    class FakeRAG:
+        def __init__(self):
+            self.index_dir = Path("unused")
+
+        def is_index_loaded(self):
+            return True
+
+    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+
+    _initialize_rag_service()
+
+
+def test_initialize_rag_service_loads_existing_index(monkeypatch, tmp_path):
+    index_dir = tmp_path / "faiss_index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "stub.faiss").write_text("ok", encoding="utf-8")
+
+    class FakeRAG:
+        def __init__(self):
+            self.index_dir = index_dir
+            self.documents = None
+            self.zone = None
+            self.scope = None
+            self.loaded = False
+
+        def is_index_loaded(self):
+            return False
+
+        def load_index(self):
+            self.loaded = True
+
+        def set_documents(self, documents):
+            self.documents = documents
+
+    fake_rag = FakeRAG()
+
+    monkeypatch.setattr("app.main.rag_service", fake_rag)
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: ["doc1", "doc2"])
+
+    _initialize_rag_service()
+
+    assert fake_rag.loaded is True
+    assert fake_rag.documents == ["doc1", "doc2"]
+    assert isinstance(fake_rag.zone, str)
+    assert isinstance(fake_rag.scope, str)
+
+
+def test_initialize_rag_service_warns_when_no_documents(monkeypatch, tmp_path):
+    class FakeRAG:
+        def __init__(self):
+            self.index_dir = tmp_path / "missing_index"
+            self.zone = None
+            self.scope = None
+
+        def is_index_loaded(self):
+            return False
+
+    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: [])
+
+    _initialize_rag_service()
+
+
+def test_initialize_rag_service_builds_index_when_documents_exist(monkeypatch, tmp_path):
+    class FakeRAG:
+        def __init__(self):
+            self.index_dir = tmp_path / "missing_index"
+            self.zone = None
+            self.scope = None
+            self.documents = None
+
+        def is_index_loaded(self):
+            return False
+
+        def rebuild_index(self, documents):
+            self.documents = documents
+            return len(documents)
+
+    fake_rag = FakeRAG()
+
+    monkeypatch.setattr("app.main.rag_service", fake_rag)
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: ["doc1", "doc2", "doc3"])
+
+    _initialize_rag_service()
+
+    assert fake_rag.zone is not None
+    assert fake_rag.scope is not None
+    assert fake_rag.documents == ["doc1", "doc2", "doc3"]
+
+
+# -------------------------------------------------------------------------
+# Routes simples
+# -------------------------------------------------------------------------
 
 def test_root_redirects_to_docs():
     client = TestClient(app)
@@ -17,11 +238,7 @@ def test_root_redirects_to_docs():
 
 
 def test_health_ok(monkeypatch):
-    class FakeRAG:
-        def is_index_loaded(self):
-            return True
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    monkeypatch.setattr("app.main.rag_service", FakeRAGHealth())
     client = TestClient(app)
 
     response = client.get("/health")
@@ -32,29 +249,12 @@ def test_health_ok(monkeypatch):
     assert data["index_loaded"] is True
 
 
-def test_ask_success(monkeypatch):
-    class FakeRAG:
-        def ask(self, question, k=None):
-            return {
-                "question": question,
-                "answer": "Réponse test",
-                "n_docs": 1,
-                "documents": [
-                    {
-                        "title": "Expo test",
-                        "location_name": "Musée",
-                        "city": "Montpellier",
-                        "region": "Occitanie",
-                        "first_date": "2026-03-01",
-                        "last_date": "2026-03-01",
-                        "event_type": "Exposition",
-                        "url": "http://test.com",
-                        "score": None,
-                    }
-                ],
-            }
+# -------------------------------------------------------------------------
+# /ask
+# -------------------------------------------------------------------------
 
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+def test_ask_success(monkeypatch):
+    monkeypatch.setattr("app.main.rag_service", FakeRAGAsk())
     client = TestClient(app)
 
     response = client.post("/ask", json={"question": "test"})
@@ -69,7 +269,7 @@ def test_ask_success(monkeypatch):
 
 def test_ask_file_not_found(monkeypatch):
     class FakeRAG:
-        def ask(self, question, k=None):
+        def ask(self, question):
             raise FileNotFoundError("index absent")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
@@ -83,7 +283,7 @@ def test_ask_file_not_found(monkeypatch):
 
 def test_ask_value_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question, k=None):
+        def ask(self, question):
             raise ValueError("question invalide")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
@@ -97,8 +297,8 @@ def test_ask_value_error(monkeypatch):
 
 def test_ask_unexpected_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question, k=None):
-            raise Exception("boom")
+        def ask(self, question):
+            raise RuntimeError("boom")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
@@ -109,20 +309,12 @@ def test_ask_unexpected_error(monkeypatch):
     assert response.json()["detail"] == "Erreur interne du serveur."
 
 
+# -------------------------------------------------------------------------
+# /ask/debug
+# -------------------------------------------------------------------------
+
 def test_ask_debug_success(monkeypatch):
-    class FakeDoc:
-        def __init__(self):
-            self.page_content = "Contenu test"
-            self.metadata = {"title": "Expo test"}
-
-    class FakeRAG:
-        def retrieve(self, question, k=None):
-            return [FakeDoc()]
-
-        def generate(self, question, docs, current_date):
-            return "Réponse debug"
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    monkeypatch.setattr("app.main.rag_service", FakeRAGAskDebug())
     client = TestClient(app)
 
     response = client.post("/ask/debug", json={"question": "test debug"})
@@ -131,11 +323,54 @@ def test_ask_debug_success(monkeypatch):
     data = response.json()
     assert data["question"] == "test debug"
     assert data["answer"] == "Réponse debug"
-    assert data["contexts"] == ["Contenu test"]
-    assert data["metadata"] == [{"title": "Expo test"}]
+    assert data["n_docs"] == 1
+    assert data["retrieved_contexts"] == ["Contenu test"]
+    assert data["documents"][0]["title"] == "Expo test"
 
 
-def test_ask_debug_value_error():
+def test_ask_debug_file_not_found(monkeypatch):
+    class FakeRAG:
+        def ask_debug(self, question):
+            raise FileNotFoundError("index absent")
+
+    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    client = TestClient(app)
+
+    response = client.post("/ask/debug", json={"question": "test debug"})
+
+    assert response.status_code == 503
+    assert "index absent" in response.json()["detail"]
+
+
+def test_ask_debug_value_error(monkeypatch):
+    class FakeRAG:
+        def ask_debug(self, question):
+            raise ValueError("question invalide")
+
+    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    client = TestClient(app)
+
+    response = client.post("/ask/debug", json={"question": "test debug"})
+
+    assert response.status_code == 400
+    assert "question invalide" in response.json()["detail"]
+
+
+def test_ask_debug_unexpected_error(monkeypatch):
+    class FakeRAG:
+        def ask_debug(self, question):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    client = TestClient(app)
+
+    response = client.post("/ask/debug", json={"question": "test debug"})
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == "Erreur interne du serveur."
+
+
+def test_ask_debug_empty_question_returns_422():
     client = TestClient(app)
 
     response = client.post("/ask/debug", json={"question": ""})
@@ -143,21 +378,13 @@ def test_ask_debug_value_error():
     assert response.status_code == 422
 
 
+# -------------------------------------------------------------------------
+# /rebuild
+# -------------------------------------------------------------------------
+
 def test_rebuild_success(monkeypatch):
-    class FakeRAG:
-        def set_documents(self, documents):
-            self.documents = documents
-
-        def build_index(self):
-            return 2
-
-    fake_documents = ["doc1", "doc2"]
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
-    monkeypatch.setattr(
-        "app.main.load_documents",
-        lambda zone, scope, source="api": fake_documents,
-    )
+    monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: ["doc1", "doc2"])
     client = TestClient(app)
 
     response = client.post(
@@ -168,23 +395,13 @@ def test_rebuild_success(monkeypatch):
     assert response.status_code == 200
     data = response.json()
     assert data["status"] == "success"
-    assert "reconstruite" in data["message"]
+    assert data["message"] == "Index reconstruit avec 2 documents."
     assert data["n_docs_indexed"] == 2
 
 
 def test_rebuild_no_documents(monkeypatch):
-    class FakeRAG:
-        def set_documents(self, documents):
-            return None
-
-        def build_index(self):
-            return 0
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
-    monkeypatch.setattr(
-        "app.main.load_documents",
-        lambda zone, scope, source="api": [],
-    )
+    monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: [])
     client = TestClient(app)
 
     response = client.post(
@@ -197,45 +414,48 @@ def test_rebuild_no_documents(monkeypatch):
 
 
 def test_rebuild_uses_default_zone_and_scope(monkeypatch):
-    class FakeRAG:
-        def set_documents(self, documents):
-            return None
-
-        def build_index(self):
-            return 1
-
     captured = {}
 
-    def fake_load_documents(zone, scope, source="api"):
+    def fake_load_documents(*, zone, scope):
         captured["zone"] = zone
         captured["scope"] = scope
-        captured["source"] = source
-        return ["doc"]
+        return ["doc1", "doc2"]
 
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
+    monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())
     monkeypatch.setattr("app.main.load_documents", fake_load_documents)
     client = TestClient(app)
 
     response = client.post("/rebuild", json={})
 
     assert response.status_code == 200
-    assert captured["source"] == "api"
     assert isinstance(captured["zone"], str)
     assert isinstance(captured["scope"], str)
 
 
+def test_rebuild_value_error(monkeypatch):
+    monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())
+
+    def fake_load_documents(zone, scope):
+        raise ValueError("zone invalide")
+
+    monkeypatch.setattr("app.main.load_documents", fake_load_documents)
+    client = TestClient(app)
+
+    response = client.post(
+        "/rebuild",
+        json={"zone": "Montpellier", "scope": "city"},
+    )
+
+    assert response.status_code == 400
+    assert "zone invalide" in response.json()["detail"]
+
+
 def test_rebuild_unexpected_error(monkeypatch):
-    class FakeRAG:
-        def set_documents(self, documents):
-            return None
+    monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())
 
-        def build_index(self):
-            return 0
+    def fake_load_documents(zone, scope):
+        raise RuntimeError("boom")
 
-    def fake_load_documents(zone, scope, source="api"):
-        raise Exception("erreur chargement")
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
     monkeypatch.setattr("app.main.load_documents", fake_load_documents)
     client = TestClient(app)
 

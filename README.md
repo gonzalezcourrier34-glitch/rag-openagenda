@@ -25,16 +25,16 @@ Dans ce projet, j’ai conçu un assistant intelligent capable de recommander de
 </p>
 
 <p>
-L’objectif est de m’appuyer sur une architecture <strong>RAG (Retrieval-Augmented Generation)</strong> afin d’interroger des données réelles issues de l’API <strong>OpenAgenda</strong>, retrouver les événements les plus pertinents, puis générer une réponse claire, contextualisée et exploitable.
+L’objectif est de m’appuyer sur une architecture <strong>RAG (Retrieval-Augmented Generation)</strong> afin d’interroger des données réelles issues de l’API <strong>OpenAgenda</strong>, de retrouver les événements les plus pertinents, puis de générer une réponse claire, contextualisée et exploitable.
 </p>
 
 <p>
-Ce projet m’a permis de travailler sur une chaîne complète de traitement, depuis la collecte des données jusqu’à leur exposition dans une application conteneurisée.
+Ce projet m’a permis de travailler sur une chaîne complète, depuis la collecte des données jusqu’à leur exposition dans une application conteneurisée.
 </p>
 
 <ul>
   <li>collecte des données via API</li>
-  <li>préparation et structuration de données textuelles</li>
+  <li>préparation et structuration des données textuelles</li>
   <li>vectorisation et recherche sémantique</li>
   <li>génération de réponse avec un LLM</li>
   <li>exposition du système via API FastAPI</li>
@@ -90,7 +90,7 @@ L’objectif est qu’un utilisateur puisse poser une question comme :
 </blockquote>
 
 <p>
-et obtenir une réponse générée à partir d’événements réellement disponibles dans les données chargées.
+et obtenir une réponse générée à partir d’événements réellement présents dans les données chargées.
 </p>
 
 <h3>Périmètre</h3>
@@ -107,7 +107,7 @@ et obtenir une réponse générée à partir d’événements réellement dispon
 <h2>2. Architecture du système</h2>
 
 <p>
-L’architecture repose sur une chaîne de traitement modulaire, dans laquelle chaque composant remplit un rôle précis.
+L’architecture repose sur une chaîne de traitement modulaire dans laquelle chaque composant remplit un rôle précis.
 </p>
 
 <pre><code>Utilisateur
@@ -122,7 +122,9 @@ FastAPI
 RAGService
  │
  ├── document_service → collecte, persistance et préparation des événements
- ├── FAISS → index vectoriel
+ ├── filter_service → préfiltrage structuré des documents
+ ├── retrieval_service → ranking métier des candidats
+ ├── FAISS → recherche vectorielle
  ├── memory_service → mémoire locale des échanges
  └── Mistral → génération de réponse
      │
@@ -139,11 +141,11 @@ Dans la version conteneurisée du projet, cette logique s’intègre dans une ar
         ▼
 api (FastAPI)
         │
+        ├── OpenAgenda
         ├── FAISS
         ├── mémoire locale
-        ├── OpenAgenda
-        ├── MLflow
-        └── PostgreSQL
+        ├── PostgreSQL
+        └── MLflow
 </code></pre>
 
 <p>
@@ -198,13 +200,13 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
   <li>d’uniformiser les noms de colonnes</li>
   <li>de gérer les valeurs manquantes</li>
   <li>de nettoyer les champs textuels</li>
-  <li>de préparer les métadonnées utiles pour l’affichage et la recherche</li>
+  <li>de préparer les métadonnées utiles pour l’affichage, le filtrage et la recherche</li>
 </ul>
 
 <h3>Chunking</h3>
 
 <p>
-Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement comme un document unique</strong>. Ce choix reste adapté au format des données et au périmètre du prototype.
+Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement comme un document unique</strong>. Ce choix est adapté au format des données et au périmètre du prototype.
 </p>
 
 <p>
@@ -250,7 +252,7 @@ Le prompt utilisé impose une contrainte importante : le modèle doit répondre 
 </p>
 
 <p>
-La principale limite reste la dépendance à la qualité des documents récupérés. Si le retrieval manque de pertinence, la génération finale en hérite directement.
+La principale limite reste la dépendance à la qualité du retrieval. Si les documents remontés sont peu pertinents, la génération finale en hérite directement.
 </p>
 
 <hr>
@@ -374,25 +376,29 @@ Cette partie permet de rapprocher le prototype d’un fonctionnement plus indust
 <h2>8. Évaluation du système</h2>
 
 <p>
-Pour évaluer le prototype, j’ai constitué un petit ensemble de questions couvrant différents besoins :
+Pour évaluer le prototype, j’ai constitué un ensemble de questions couvrant plusieurs cas d’usage :
 </p>
 
 <ul>
-  <li>recherche d’expositions</li>
-  <li>activités familiales</li>
-  <li>visites patrimoniales</li>
-  <li>demandes culturelles plus générales</li>
+  <li>questions positives avec réponse attendue claire</li>
+  <li>questions ambiguës avec plusieurs réponses possibles</li>
+  <li>questions négatives sans événement correspondant</li>
 </ul>
 
 <p>
-L’évaluation a été principalement qualitative. Je me suis concentré sur :
+L’évaluation a combiné une analyse qualitative et des métriques automatiques sur :
 </p>
 
 <ul>
-  <li>la pertinence des documents récupérés</li>
-  <li>la cohérence de la réponse générée</li>
+  <li>la fidélité de la réponse par rapport au contexte</li>
+  <li>la pertinence de la réponse</li>
+  <li>la précision et le rappel des contextes retrouvés</li>
   <li>la capacité du système à ne pas inventer d’informations</li>
 </ul>
+
+<p>
+Cette phase m’a également permis d’identifier plusieurs pistes d’amélioration sur le préfiltrage, la gestion des ambiguïtés, le ranking métier et le traitement des contraintes temporelles.
+</p>
 
 <hr>
 
@@ -413,17 +419,17 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 <ul>
   <li>la qualité dépend fortement des données disponibles dans OpenAgenda</li>
   <li>le volume d’événements peut rester limité selon la zone ou la période choisie</li>
-  <li>le filtrage métier reste encore simple</li>
+  <li>le filtrage métier reste encore perfectible</li>
   <li>les coûts peuvent augmenter avec les embeddings et les appels LLM</li>
 </ul>
 
 <h3>Améliorations possibles</h3>
 
 <ul>
-  <li>ajout d’un reranking des documents</li>
+  <li>ajout d’un reranking plus avancé des documents</li>
   <li>amélioration du filtrage par métadonnées</li>
   <li>mise en place d’une recherche hybride vectorielle et lexicale</li>
-  <li>mémoire conversationnelle plus avancée</li>
+  <li>mémoire conversationnelle plus évoluée</li>
   <li>déploiement cloud</li>
   <li>monitoring plus complet</li>
   <li>renforcement du pipeline CI/CD</li>
@@ -439,6 +445,8 @@ L’évaluation a été principalement qualitative. Je me suis concentré sur :
 │   ├── main.py
 │   ├── rag_service.py
 │   ├── document_service.py
+│   ├── filter_service.py
+│   ├── retrieval_service.py
 │   ├── memory_service.py
 │   ├── schemas.py
 │   ├── security.py
@@ -487,7 +495,7 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
   <li>afficher la réponse générée dans un format plus lisible</li>
   <li>visualiser les documents utilisés</li>
   <li>consulter un historique local</li>
-  <li>déclencher un rebuild de la base</li>
+  <li>déclencher une reconstruction de la base</li>
 </ul>
 
 <hr>
@@ -509,7 +517,7 @@ J’ai ajouté <strong>PostgreSQL</strong> comme base de données afin de prépa
 <h3>Docker</h3>
 
 <p>
-L’ensemble de l’application est containerisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer la stack avec une seule commande et d’obtenir un environnement reproductible.
+L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer la stack avec une seule commande et d’obtenir un environnement reproductible.
 </p>
 
 <ul>

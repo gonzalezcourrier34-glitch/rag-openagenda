@@ -1,692 +1,558 @@
-from pathlib import Path
+"""
+Tests unitaires du module document_service.
 
-import pandas as pd
+Objectifs :
+- valider les helpers internes
+- valider la construction des métadonnées documentaires
+- valider la transformation d'un événement OpenAgenda en Document
+- valider le chargement complet avec déduplication et filtrage zone/scope
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+
 import pytest
-import requests
 from langchain_core.documents import Document
 
-from app.document_service import (
-    _safe,
-    build_event_document,
-    build_indexable_text,
-    doc_matches_filters,
-    extract_filters_from_question,
-    fetch_and_save_events,
-    fetch_openagenda_events,
-    get_known_metadata_values,
-    load_documents,
-    load_events_from_csv,
-    load_events_from_json,
-    normalize_events,
-    normalize_text,
-    parse_date_filters,
-    save_events_to_csv,
-    save_events_to_json,
-    score_document,
-    search_agendas_for_zone,
-)
+import app.document_service as ds
 
 
-class FakeResponse:
-    def __init__(self, payload: dict, status_code: int = 200):
-        self._payload = payload
-        self.status_code = status_code
-
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise requests.HTTPError(f"HTTP error {self.status_code}")
-
-    def json(self):
-        return self._payload
-
+# -------------------------------------------------------------------------
+# Helpers de test
+# -------------------------------------------------------------------------
 
 @pytest.fixture
-def sample_documents():
-    return [
-        Document(
-            page_content="Exposition architecture à Montpellier",
-            metadata={
-                "title": "Expo Archi",
-                "location_name": "Musée Fabre",
-                "city": "Montpellier",
-                "region": "Occitanie",
-                "first_date": "2025-09-20",
-                "last_date": "2025-09-21",
-                "event_type": "Exposition",
-                "url": "http://test.com",
-            },
-        ),
-        Document(
-            page_content="Concert jazz à Sète",
-            metadata={
-                "title": "Jazz Night",
-                "location_name": "Salle Y",
-                "city": "Sète",
-                "region": "Occitanie",
-                "first_date": "2025-09-15",
-                "last_date": "2025-09-15",
-                "event_type": "Concert",
-                "url": "http://concert.com",
-            },
-        ),
-    ]
-
-
-def test_safe_none():
-    assert _safe(None) == ""
-
-
-def test_safe_value():
-    assert _safe(123) == "123"
-    assert _safe("abc") == "abc"
-
-
-def test_normalize_text_basic():
-    assert normalize_text("  Musée Fabre  ") == "musee fabre"
-    assert normalize_text("Événement   Culturel") == "evenement culturel"
-
-
-def test_save_and_load_events_json(tmp_path: Path):
-    events = [{"uid": "1", "title": {"fr": "Expo test"}}]
-    output_path = tmp_path / "raw" / "events.json"
-
-    save_events_to_json(events, output_path)
-    loaded = load_events_from_json(output_path)
-
-    assert output_path.exists()
-    assert loaded == events
-
-
-def test_load_events_from_json_file_not_found(tmp_path: Path):
-    missing_path = tmp_path / "missing.json"
-
-    with pytest.raises(FileNotFoundError, match="Fichier JSON introuvable"):
-        load_events_from_json(missing_path)
-
-
-def test_save_and_load_events_csv(tmp_path: Path):
-    df = pd.DataFrame(
-        [
-            {
-                "event_uid": "1",
-                "title": "Expo test",
-                "description": "Description",
-            }
-        ]
-    )
-    output_path = tmp_path / "processed" / "events.csv"
-
-    save_events_to_csv(df, output_path)
-    loaded = load_events_from_csv(output_path)
-
-    assert output_path.exists()
-    assert isinstance(loaded, pd.DataFrame)
-    assert loaded.loc[0, "title"] == "Expo test"
-
-
-def test_load_events_from_csv_file_not_found(tmp_path: Path):
-    missing_path = tmp_path / "missing.csv"
-
-    with pytest.raises(FileNotFoundError, match="Fichier CSV introuvable"):
-        load_events_from_csv(missing_path)
-
-
-def test_normalize_events_empty():
-    df = normalize_events([])
-
-    assert isinstance(df, pd.DataFrame)
-    assert df.empty
-    expected_cols = [
-        "event_uid",
-        "agenda_uid",
-        "title",
-        "description",
-        "location_name",
-        "city",
-        "region",
-        "first_date",
-        "last_date",
-        "event_type",
-        "source_url",
-    ]
-    assert list(df.columns) == expected_cols
-
-
-def test_normalize_events_basic():
-    events = [
-        {
-            "uid": "1",
-            "agenda": {"uid": "42"},
-            "title": {"fr": "Expo architecture"},
-            "description": {"fr": " Une    belle   exposition "},
-            "canonicalUrl": "http://test.com",
-            "firstDate": "2026-03-01",
-            "lastDate": "2026-03-10",
-            "eventType": "Exposition",
-            "location": {
-                "name": "Musée Fabre",
-                "city": "Montpellier",
-                "region": "Occitanie",
-            },
-        }
-    ]
-
-    df = normalize_events(events)
-
-    assert len(df) == 1
-    assert df.loc[0, "event_uid"] == "1"
-    assert df.loc[0, "agenda_uid"] == "42"
-    assert df.loc[0, "title"] == "Expo architecture"
-    assert df.loc[0, "description"] == "Une belle exposition"
-    assert df.loc[0, "city"] == "Montpellier"
-    assert df.loc[0, "region"] == "Occitanie"
-    assert df.loc[0, "source_url"] == "http://test.com"
-
-
-def test_build_indexable_text():
-    df = pd.DataFrame(
-        [
-            {
-                "title": "Expo",
-                "description": "Architecture",
-                "location_name": "Musée",
-                "city": "Montpellier",
-                "region": "Occitanie",
-                "first_date": "2026-03-01",
-                "last_date": "2026-03-10",
-                "event_type": "Exposition",
-            }
-        ]
-    )
-
-    result = build_indexable_text(df)
-
-    assert "text_for_embedding" in result.columns
-    text = result.loc[0, "text_for_embedding"]
-    assert "Titre : Expo" in text
-    assert "Description : Architecture" in text
-    assert "Ville : Montpellier" in text
-
-
-def test_build_event_document_with_prebuilt_text():
-    event = {
-        "event_uid": "1",
-        "agenda_uid": "42",
-        "title": "Expo",
-        "description": "Architecture",
-        "location_name": "Musée",
-        "city": "Montpellier",
-        "region": "Occitanie",
-        "first_date": "2026-03-01",
-        "last_date": "2026-03-10",
-        "event_type": "Exposition",
-        "source_url": "http://test.com",
-        "text_for_embedding": "Texte déjà prêt",
+def sample_event() -> dict:
+    return {
+        "uid": "evt_001",
+        "agenda": {"uid": "agenda_123"},
+        "title": {"fr": "Exposition peinture moderne"},
+        "description": {"fr": "Une belle exposition d'art contemporain gratuite."},
+        "longDescription": {"fr": "Venez découvrir plusieurs artistes locaux."},
+        "location": {
+            "name": "Musée Fabre",
+            "city": "Montpellier",
+            "region": "Occitanie",
+        },
+        "firstDate": "2025-09-21T18:30:00Z",
+        "lastDate": "2025-09-23T20:00:00Z",
+        "eventType": "Exposition",
+        "canonicalUrl": "https://openagenda.com/event/evt_001",
+        "conditions": "Entrée libre",
+        "pricing": "",
+        "attendanceMode": "",
     }
 
-    doc = build_event_document(event)
+
+# -------------------------------------------------------------------------
+# _nested_get
+# -------------------------------------------------------------------------
+
+def test_nested_get_returns_nested_value():
+    data = {"a": {"b": {"c": "ok"}}}
+    assert ds._nested_get(data, "a", "b", "c") == "ok"
+
+
+def test_nested_get_returns_none_when_path_missing():
+    data = {"a": {"b": {}}}
+    assert ds._nested_get(data, "a", "b", "c") is None
+
+
+def test_nested_get_returns_none_when_intermediate_is_not_dict():
+    data = {"a": "not_a_dict"}
+    assert ds._nested_get(data, "a", "b") is None
+
+
+# -------------------------------------------------------------------------
+# _first_non_empty
+# -------------------------------------------------------------------------
+
+def test_first_non_empty_returns_first_textual_value():
+    assert ds._first_non_empty(None, "", "bonjour", "salut") == "bonjour"
+
+
+def test_first_non_empty_returns_empty_string_when_all_empty():
+    assert ds._first_non_empty(None, "", "   ") == ""
+
+
+# -------------------------------------------------------------------------
+# _extract_event_field
+# -------------------------------------------------------------------------
+
+def test_extract_event_field_returns_first_matching_field():
+    event = {
+        "title": "",
+        "alt": {"fr": "Titre alternatif"},
+    }
+    value = ds._extract_event_field(event, ("title",), ("alt", "fr"))
+    assert value == "Titre alternatif"
+
+
+def test_extract_event_field_returns_empty_string_when_no_match():
+    event = {}
+    value = ds._extract_event_field(event, ("title",), ("description", "fr"))
+    assert value == ""
+
+
+# -------------------------------------------------------------------------
+# Dates
+# -------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [
+        ("2025-09-21", datetime(2025, 9, 21)),
+        ("2025-09-21T18:30:00", datetime(2025, 9, 21, 18, 30, 0)),
+    ],
+)
+def test_parse_iso_date_valid_formats(value, expected):
+    parsed = ds._parse_iso_date(value)
+    assert parsed is not None
+    assert parsed.year == expected.year
+    assert parsed.month == expected.month
+    assert parsed.day == expected.day
+
+
+def test_parse_iso_date_accepts_z_suffix():
+    parsed = ds._parse_iso_date("2025-09-21T18:30:00Z")
+    assert parsed is not None
+    assert parsed.year == 2025
+    assert parsed.month == 9
+    assert parsed.day == 21
+
+
+def test_parse_iso_date_returns_none_for_invalid_value():
+    assert ds._parse_iso_date("not-a-date") is None
+    assert ds._parse_iso_date(None) is None
+
+
+def test_normalize_iso_day_returns_yyyy_mm_dd():
+    assert ds._normalize_iso_day("2025-09-21T18:30:00Z") == "2025-09-21"
+
+
+def test_normalize_iso_day_returns_empty_string_when_invalid():
+    assert ds._normalize_iso_day("bad-date") == ""
+
+
+def test_build_duration_label_no_dates():
+    assert ds._build_duration_label("", "") == "durée non précisée"
+
+
+def test_build_duration_label_single_day():
+    assert ds._build_duration_label("2025-09-21", "2025-09-21") == "événement sur une journée"
+
+
+def test_build_duration_label_multiple_days():
+    assert ds._build_duration_label("2025-09-21", "2025-09-23") == "événement sur plusieurs jours"
+
+
+def test_compute_duration_days_none_when_no_dates():
+    assert ds._compute_duration_days("", "") is None
+
+
+def test_compute_duration_days_one_when_only_first_date():
+    assert ds._compute_duration_days("2025-09-21", "") == 1
+
+
+def test_compute_duration_days_multiple_days():
+    assert ds._compute_duration_days("2025-09-21", "2025-09-23") == 3
+
+
+# -------------------------------------------------------------------------
+# Qualité / enrichissement
+# -------------------------------------------------------------------------
+
+def test_compute_content_quality_counts_present_fields():
+    score = ds._compute_content_quality(
+        title="Titre",
+        description="Desc",
+        long_description="Long",
+        location_name="Lieu",
+        city="Montpellier",
+        region="Occitanie",
+        first_date="2025-09-21",
+        last_date="2025-09-22",
+        source_url="https://example.com",
+        price_info="gratuit",
+        event_type="expo",
+        music_genre="",
+        canonical_event_type="exposition",
+    )
+    assert score == 12
+
+
+def test_build_cultural_tags_for_exhibition():
+    tags = ds._build_cultural_tags(
+        canonical_event_type="exposition",
+        derived_terms=["expo", "vernissage"],
+    )
+    assert "culture" in tags
+    assert "artistique" in tags
+    assert "exposition" in tags
+
+
+def test_build_search_text_contains_core_fields():
+    text = ds._build_search_text(
+        title="Concert jazz",
+        description="Une soirée musicale",
+        long_description="Avec plusieurs artistes",
+        location_name="Salle Victoire 2",
+        city="Montpellier",
+        region="Occitanie",
+        event_type="Concert",
+        canonical_event_type="concert",
+        canonical_music_genre="jazz",
+        audience_terms=["tout public"],
+        first_date="2025-09-21",
+        last_date="2025-09-21",
+        price_info="gratuit",
+        access_label="gratuit",
+        duration_label="événement sur une journée",
+        title_keywords=["concert", "jazz"],
+        derived_terms=["concert", "live"],
+        derived_music_terms=["jazz"],
+        cultural_tags=["musique", "concert"],
+    )
+    assert "concert jazz" in text.lower()
+    assert "montpellier" in text.lower()
+    assert "gratuit" in text.lower()
+    assert "musique" in text.lower()
+
+
+# -------------------------------------------------------------------------
+# Cohérence zone / scope
+# -------------------------------------------------------------------------
+
+def test_matches_zone_scope_city_true():
+    doc = Document(page_content="x", metadata={"city": "Montpellier"})
+    assert ds._matches_zone_scope(doc, zone="Montpellier", scope="city") is True
+
+
+def test_matches_zone_scope_city_false():
+    doc = Document(page_content="x", metadata={"city": "Sète"})
+    assert ds._matches_zone_scope(doc, zone="Montpellier", scope="city") is False
+
+
+def test_matches_zone_scope_non_city_returns_true():
+    doc = Document(page_content="x", metadata={"city": ""})
+    assert ds._matches_zone_scope(doc, zone="Montpellier", scope="region") is True
+
+
+# -------------------------------------------------------------------------
+# Fenêtre de dates
+# -------------------------------------------------------------------------
+
+def test_get_default_date_window_returns_two_iso_dates():
+    date_from, date_to = ds.get_default_date_window()
+    assert isinstance(date_from, str)
+    assert isinstance(date_to, str)
+    assert len(date_from) == 10
+    assert len(date_to) == 10
+    assert date_from < date_to
+
+
+# -------------------------------------------------------------------------
+# build_event_document
+# -------------------------------------------------------------------------
+
+def test_build_event_document_returns_langchain_document(sample_event):
+    doc = ds.build_event_document(sample_event)
 
     assert isinstance(doc, Document)
-    assert doc.page_content == "Texte déjà prêt"
-    assert doc.metadata["doc_id"] == "openagenda_1"
-    assert doc.metadata["chunk_id"] == "openagenda_1_0"
-    assert doc.metadata["title"] == "Expo"
-    assert doc.metadata["url"] == "http://test.com"
+    assert "Titre : Exposition peinture moderne" in doc.page_content
+    assert doc.metadata["event_uid"] == "evt_001"
+    assert doc.metadata["agenda_uid"] == "agenda_123"
+    assert doc.metadata["title"] == "Exposition peinture moderne"
+    assert doc.metadata["location_name"] == "Musée Fabre"
+    assert doc.metadata["city"] == "Montpellier"
+    assert doc.metadata["region"] == "Occitanie"
+    assert doc.metadata["first_date"] == "2025-09-21"
+    assert doc.metadata["last_date"] == "2025-09-23"
+    assert doc.metadata["source"] == "openagenda"
+    assert doc.metadata["url"] == "https://openagenda.com/event/evt_001"
+    assert doc.metadata["doc_id"] == "openagenda_evt_001"
 
 
-def test_build_event_document_without_prebuilt_text():
+def test_build_event_document_sets_duration_fields(sample_event):
+    doc = ds.build_event_document(sample_event)
+
+    assert doc.metadata["duration_label"] == "événement sur plusieurs jours"
+    assert doc.metadata["duration_days"] == 3
+    assert doc.metadata["is_single_day"] is False
+
+
+def test_build_event_document_sets_has_long_description(sample_event):
+    doc = ds.build_event_document(sample_event)
+    assert doc.metadata["has_long_description"] is True
+
+
+def test_build_event_document_keeps_empty_music_genre_without_musical_context(sample_event):
+    doc = ds.build_event_document(sample_event)
+    assert doc.metadata["music_genre"] == ""
+    assert doc.metadata["derived_music_terms"] == []
+
+
+def test_build_event_document_builds_normalized_fields(sample_event):
+    doc = ds.build_event_document(sample_event)
+
+    assert doc.metadata["title_norm"]
+    assert doc.metadata["city_norm"] == "montpellier"
+    assert doc.metadata["region_norm"] == "occitanie"
+
+
+def test_build_event_document_handles_missing_optional_fields():
     event = {
-        "event_uid": "2",
-        "agenda_uid": "99",
-        "title": "Concert",
-        "description": "Musique live",
-        "location_name": "Salle A",
-        "city": "Sète",
-        "region": "Occitanie",
-        "first_date": "2026-04-01",
-        "last_date": "2026-04-01",
-        "event_type": "Concert",
-        "source_url": "http://concert.com",
+        "uid": "evt_002",
+        "title": {"fr": "Atelier créatif"},
+        "location": {"city": "Montpellier"},
+        "firstDate": "2025-10-10",
+        "lastDate": "2025-10-10",
     }
 
-    doc = build_event_document(event)
+    doc = ds.build_event_document(event)
 
-    assert "Titre : Concert" in doc.page_content
-    assert "Description : Musique live" in doc.page_content
-    assert doc.metadata["event_uid"] == "2"
-    assert doc.metadata["city"] == "Sète"
-
-
-def test_get_known_metadata_values(sample_documents):
-    values = get_known_metadata_values(sample_documents)
-
-    assert "montpellier" in values["cities"]
-    assert "sete" in values["cities"]
-    assert "musee fabre" in values["locations"]
-    assert "exposition" in values["event_types"]
-    assert "concert" in values["event_types"]
+    assert doc.metadata["event_uid"] == "evt_002"
+    assert doc.metadata["title"] == "Atelier créatif"
+    assert doc.metadata["city"] == "Montpellier"
+    assert doc.metadata["duration_days"] == 1
+    assert doc.metadata["is_single_day"] is True
+    assert doc.metadata["source_url"] == ""
 
 
-def test_parse_date_filters_month():
-    start, end = parse_date_filters("Quels événements à Montpellier en septembre 2025 ?")
+# -------------------------------------------------------------------------
+# search_agendas_for_zone
+# -------------------------------------------------------------------------
 
-    assert start == "2025-09-01"
-    assert end == "2025-09-30"
-
-
-def test_parse_date_filters_exact_date():
-    start, end = parse_date_filters("Quels événements le 20 septembre 2025 ?")
-
-    assert start == "2025-09-20"
-    assert end == "2025-09-20"
+def test_search_agendas_for_zone_raises_when_api_key_missing(monkeypatch):
+    monkeypatch.setattr(ds, "OPENAGENDA_API_KEY", "")
+    with pytest.raises(ValueError, match="OPENAGENDA_API_KEY manquante"):
+        ds.search_agendas_for_zone("Montpellier")
 
 
-def test_parse_date_filters_range():
-    start, end = parse_date_filters("Quels événements du 20 au 21 septembre 2025 ?")
+def test_search_agendas_for_zone_calls_api(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
 
-    assert start == "2025-09-20"
-    assert end == "2025-09-21"
-
-
-def test_parse_date_filters_numeric():
-    start, end = parse_date_filters("Quels événements le 20/09/2025 ?")
-
-    assert start == "2025-09-20"
-    assert end == "2025-09-20"
-
-
-def test_parse_date_filters_today():
-    start, end = parse_date_filters("Quels événements aujourd'hui ?")
-
-    assert start is not None
-    assert end is not None
-    assert start == end
-
-
-def test_extract_filters_from_question(sample_documents):
-    filters = extract_filters_from_question(
-        question="Y a-t-il une exposition au Musée Fabre à Montpellier en septembre 2025 ?",
-        documents=sample_documents,
-    )
-
-    assert "montpellier" in filters["cities"]
-    assert "musee fabre" in filters["locations"]
-    assert "exposition" in filters["event_types"]
-    assert filters["date_start"] == "2025-09-01"
-    assert filters["date_end"] == "2025-09-30"
-
-
-def test_extract_filters_from_question_fuzzy_city(sample_documents):
-    filters = extract_filters_from_question(
-        question="Je cherche une exposition à Montpelier",
-        documents=sample_documents,
-    )
-
-    assert "montpellier" in filters["cities"]
-
-
-def test_doc_matches_filters_true(sample_documents):
-    filters = {
-        "cities": ["montpellier"],
-        "locations": ["musee fabre"],
-        "event_types": ["exposition"],
-        "date_start": "2025-09-01",
-        "date_end": "2025-09-30",
-        "keywords": [],
-    }
-
-    assert doc_matches_filters(sample_documents[0], filters) is True
-
-
-def test_doc_matches_filters_false_city(sample_documents):
-    filters = {
-        "cities": ["montpellier"],
-        "locations": [],
-        "event_types": [],
-        "date_start": None,
-        "date_end": None,
-        "keywords": [],
-    }
-
-    assert doc_matches_filters(sample_documents[1], filters) is False
-
-
-def test_doc_matches_filters_false_date(sample_documents):
-    filters = {
-        "cities": [],
-        "locations": [],
-        "event_types": [],
-        "date_start": "2025-10-01",
-        "date_end": "2025-10-31",
-        "keywords": [],
-    }
-
-    assert doc_matches_filters(sample_documents[0], filters) is False
-
-
-def test_score_document_prefers_matching_doc(sample_documents):
-    filters = {
-        "cities": ["montpellier"],
-        "locations": ["musee fabre"],
-        "event_types": ["exposition"],
-        "date_start": "2025-09-01",
-        "date_end": "2025-09-30",
-        "keywords": ["architecture"],
-    }
-
-    score_0 = score_document(
-        question="Je cherche une exposition d'architecture au Musée Fabre à Montpellier",
-        doc=sample_documents[0],
-        filters=filters,
-    )
-    score_1 = score_document(
-        question="Je cherche une exposition d'architecture au Musée Fabre à Montpellier",
-        doc=sample_documents[1],
-        filters=filters,
-    )
-
-    assert score_0 > score_1
-
-
-def test_search_agendas_for_zone_ok(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
+        def json(self):
+            return {"agendas": [{"uid": "ag_1"}, {"uid": "ag_2"}]}
 
     def fake_get(url, headers=None, params=None, timeout=None):
-        assert "api.openagenda.com/v2/agendas" in url
+        assert "agendas" in url
         assert headers == {"key": "fake-key"}
         assert params["search"] == "Montpellier"
-        return FakeResponse({"agendas": [{"uid": "123"}, {"uid": "456"}]})
+        assert params["official"] == 1
+        return FakeResponse()
 
-    monkeypatch.setattr("app.document_service.requests.get", fake_get)
+    monkeypatch.setattr(ds, "OPENAGENDA_API_KEY", "fake-key")
+    monkeypatch.setattr(ds.requests, "get", fake_get)
 
-    agendas = search_agendas_for_zone("Montpellier")
-
-    assert isinstance(agendas, list)
+    agendas = ds.search_agendas_for_zone("Montpellier")
     assert len(agendas) == 2
-    assert agendas[0]["uid"] == "123"
+    assert agendas[0]["uid"] == "ag_1"
 
 
-def test_search_agendas_for_zone_missing_api_key(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "")
+# -------------------------------------------------------------------------
+# fetch_openagenda_events
+# -------------------------------------------------------------------------
 
+def test_fetch_openagenda_events_raises_when_api_key_missing(monkeypatch):
+    monkeypatch.setattr(ds, "OPENAGENDA_API_KEY", "")
     with pytest.raises(ValueError, match="OPENAGENDA_API_KEY manquante"):
-        search_agendas_for_zone("Montpellier")
+        ds.fetch_openagenda_events("agenda_1", "Montpellier")
 
 
-def test_search_agendas_for_zone_invalid_payload(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
+def test_fetch_openagenda_events_paginates_until_empty(monkeypatch):
+    calls = []
 
-    monkeypatch.setattr(
-        "app.document_service.requests.get",
-        lambda *args, **kwargs: FakeResponse({"unexpected": []}),
-    )
+    class FakeResponse:
+        def __init__(self, payload):
+            self.payload = payload
 
-    with pytest.raises(ValueError, match="Réponse inattendue"):
-        search_agendas_for_zone("Montpellier")
+        def raise_for_status(self):
+            return None
 
-
-def test_search_agendas_for_zone_request_error(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
-
-    def fake_get(*args, **kwargs):
-        raise requests.RequestException("boom")
-
-    monkeypatch.setattr("app.document_service.requests.get", fake_get)
-
-    with pytest.raises(RuntimeError, match="Erreur réseau lors de la recherche des agendas"):
-        search_agendas_for_zone("Montpellier")
-
-
-def test_fetch_openagenda_events_ok(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
-
-    page_1 = {
-        "events": [{"uid": "1"}, {"uid": "2"}],
-        "total": 3,
-    }
-    page_2 = {
-        "events": [{"uid": "3"}],
-        "total": 3,
-    }
-
-    calls = {"count": 0}
+        def json(self):
+            return self.payload
 
     def fake_get(url, params=None, timeout=None):
-        calls["count"] += 1
-        if calls["count"] == 1:
-            return FakeResponse(page_1)
-        return FakeResponse(page_2)
+        calls.append(params["offset"])
+        if params["offset"] == 0:
+            return FakeResponse({"events": [{"uid": "e1"}, {"uid": "e2"}]})
+        if params["offset"] == 200:
+            return FakeResponse({"events": [{"uid": "e3"}]})
+        return FakeResponse({"events": []})
 
-    monkeypatch.setattr("app.document_service.requests.get", fake_get)
+    monkeypatch.setattr(ds, "OPENAGENDA_API_KEY", "fake-key")
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    monkeypatch.setattr(ds, "get_default_date_window", lambda: ("2025-01-01", "2025-12-31"))
 
-    events = fetch_openagenda_events(
-        agenda_uid="123",
+    events = ds.fetch_openagenda_events(
+        agenda_uid="agenda_1",
         zone="Montpellier",
         scope="city",
-        limit=2,
+        limit=200,
         max_pages=10,
     )
 
-    assert len(events) == 3
-    assert events[0]["uid"] == "1"
-    assert events[-1]["uid"] == "3"
+    assert [e["uid"] for e in events] == ["e1", "e2", "e3"]
+    assert calls == [0, 200, 400]
 
 
-def test_fetch_openagenda_events_missing_api_key(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "")
+def test_fetch_openagenda_events_respects_max_pages(monkeypatch):
+    class FakeResponse:
+        def raise_for_status(self):
+            return None
 
-    with pytest.raises(ValueError, match="OPENAGENDA_API_KEY manquante"):
-        fetch_openagenda_events("123", "Montpellier")
+        def json(self):
+            return {"events": [{"uid": "e1"}]}
 
+    def fake_get(url, params=None, timeout=None):
+        return FakeResponse()
 
-def test_fetch_openagenda_events_invalid_payload(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
+    monkeypatch.setattr(ds, "OPENAGENDA_API_KEY", "fake-key")
+    monkeypatch.setattr(ds.requests, "get", fake_get)
+    monkeypatch.setattr(ds, "get_default_date_window", lambda: ("2025-01-01", "2025-12-31"))
 
-    monkeypatch.setattr(
-        "app.document_service.requests.get",
-        lambda *args, **kwargs: FakeResponse({"unexpected": []}),
-    )
-
-    with pytest.raises(ValueError, match="Réponse inattendue de l'API"):
-        fetch_openagenda_events("123", "Montpellier")
-
-
-def test_fetch_openagenda_events_request_error(monkeypatch):
-    monkeypatch.setattr("app.document_service.OPENAGENDA_API_KEY", "fake-key")
-
-    def fake_get(*args, **kwargs):
-        raise requests.RequestException("boom")
-
-    monkeypatch.setattr("app.document_service.requests.get", fake_get)
-
-    with pytest.raises(RuntimeError, match="Erreur réseau lors de la récupération des événements"):
-        fetch_openagenda_events("123", "Montpellier")
-
-
-def test_fetch_and_save_events_returns_dataframe(monkeypatch, tmp_path: Path):
-    json_path = tmp_path / "raw" / "events.json"
-    csv_path = tmp_path / "processed" / "events.csv"
-
-    monkeypatch.setattr(
-        "app.document_service.search_agendas_for_zone",
-        lambda zone: [{"uid": "111"}, {"uid": "222"}],
-    )
-
-    fake_events = [
-        {
-            "uid": "1",
-            "agenda": {"uid": "111"},
-            "title": {"fr": "Expo 1"},
-            "description": {"fr": "Desc 1"},
-            "canonicalUrl": "http://test1.com",
-            "firstDate": "2026-03-01",
-            "lastDate": "2026-03-10",
-            "eventType": "Exposition",
-            "location": {
-                "name": "Lieu 1",
-                "city": "Montpellier",
-                "region": "Occitanie",
-            },
-        }
-    ]
-
-    monkeypatch.setattr(
-        "app.document_service.fetch_openagenda_events",
-        lambda agenda_uid, zone, scope: fake_events,
-    )
-
-    df = fetch_and_save_events(
+    events = ds.fetch_openagenda_events(
+        agenda_uid="agenda_1",
         zone="Montpellier",
         scope="city",
-        json_path=json_path,
-        csv_path=csv_path,
+        limit=1,
+        max_pages=2,
     )
 
-    assert not df.empty
-    assert "text_for_embedding" in df.columns
-    assert json_path.exists()
-    assert csv_path.exists()
+    assert len(events) == 2
 
 
-def test_fetch_and_save_events_skips_runtime_error_and_returns_empty(monkeypatch):
-    monkeypatch.setattr(
-        "app.document_service.search_agendas_for_zone",
-        lambda zone: [{"uid": "111"}],
-    )
+# -------------------------------------------------------------------------
+# load_documents
+# -------------------------------------------------------------------------
 
-    def fake_fetch(*args, **kwargs):
-        raise RuntimeError("erreur réseau")
+def test_load_documents_returns_deduplicated_documents(monkeypatch):
+    agendas = [
+        {"uid": "agenda_1"},
+        {"uid": "agenda_2"},
+    ]
 
-    monkeypatch.setattr("app.document_service.fetch_openagenda_events", fake_fetch)
-
-    df = fetch_and_save_events(zone="Montpellier", scope="city")
-
-    assert isinstance(df, pd.DataFrame)
-    assert df.empty
-
-
-def test_fetch_and_save_events_no_agendas(monkeypatch):
-    monkeypatch.setattr("app.document_service.search_agendas_for_zone", lambda zone: [])
-
-    df = fetch_and_save_events(zone="Montpellier", scope="city")
-
-    assert isinstance(df, pd.DataFrame)
-    assert df.empty
-
-
-def test_load_documents_from_api(monkeypatch):
-    df = pd.DataFrame(
-        [
+    events_by_agenda = {
+        "agenda_1": [
             {
-                "event_uid": "1",
-                "agenda_uid": "42",
-                "title": "Expo",
-                "description": "Description",
-                "location_name": "Musée",
-                "city": "Montpellier",
-                "region": "Occitanie",
-                "first_date": "2026-03-01",
-                "last_date": "2026-03-10",
-                "event_type": "Exposition",
-                "source_url": "http://test.com",
-                "text_for_embedding": "Texte 1",
-            }
-        ]
-    )
+                "uid": "evt_1",
+                "title": {"fr": "Expo A"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-21",
+                "lastDate": "2025-09-21",
+            },
+            {
+                "uid": "evt_2",
+                "title": {"fr": "Expo B"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-22",
+                "lastDate": "2025-09-22",
+            },
+        ],
+        "agenda_2": [
+            {
+                "uid": "evt_2",
+                "title": {"fr": "Expo B dupliquée"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-22",
+                "lastDate": "2025-09-22",
+            },
+            {
+                "uid": "evt_3",
+                "title": {"fr": "Expo C"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-23",
+                "lastDate": "2025-09-23",
+            },
+        ],
+    }
 
+    monkeypatch.setattr(ds, "search_agendas_for_zone", lambda zone: agendas)
     monkeypatch.setattr(
-        "app.document_service.fetch_and_save_events",
-        lambda **kwargs: df.copy(),
+        ds,
+        "fetch_openagenda_events",
+        lambda agenda_uid, zone, scope: events_by_agenda[agenda_uid],
     )
 
-    docs = load_documents(source="api")
+    docs = ds.load_documents(zone="Montpellier", scope="city")
 
-    assert len(docs) == 1
-    assert isinstance(docs[0], Document)
-    assert docs[0].metadata["title"] == "Expo"
+    assert len(docs) == 3
+    event_uids = [doc.metadata["event_uid"] for doc in docs]
+    assert event_uids == ["evt_1", "evt_2", "evt_3"]
 
 
-def test_load_documents_from_json(tmp_path: Path):
-    json_path = tmp_path / "events.json"
+def test_load_documents_filters_on_zone_scope(monkeypatch):
+    agendas = [{"uid": "agenda_1"}]
+
     events = [
         {
-            "uid": "1",
-            "agenda": {"uid": "42"},
-            "title": {"fr": "Expo JSON"},
-            "description": {"fr": "Desc JSON"},
-            "canonicalUrl": "http://json.com",
-            "firstDate": "2026-03-01",
-            "lastDate": "2026-03-10",
-            "eventType": "Exposition",
-            "location": {
-                "name": "Musée",
-                "city": "Montpellier",
-                "region": "Occitanie",
-            },
-        }
-    ]
-    save_events_to_json(events, json_path)
-
-    docs = load_documents(source="json", json_path=json_path)
-
-    assert len(docs) == 1
-    assert docs[0].metadata["title"] == "Expo JSON"
-
-
-def test_load_documents_from_csv(tmp_path: Path):
-    csv_path = tmp_path / "events.csv"
-    df = pd.DataFrame(
-        [
-            {
-                "event_uid": "1",
-                "agenda_uid": "42",
-                "title": "Expo CSV",
-                "description": "Desc CSV",
-                "location_name": "Musée",
-                "city": "Montpellier",
-                "region": "Occitanie",
-                "first_date": "2026-03-01",
-                "last_date": "2026-03-10",
-                "event_type": "Exposition",
-                "source_url": "http://csv.com",
-                "text_for_embedding": "Texte CSV",
-            }
-        ]
-    )
-    save_events_to_csv(df, csv_path)
-
-    docs = load_documents(source="csv", csv_path=csv_path)
-
-    assert len(docs) == 1
-    assert docs[0].metadata["title"] == "Expo CSV"
-
-
-def test_load_documents_filters_poor_events_from_json(tmp_path: Path):
-    json_path = tmp_path / "events.json"
-    events = [
+            "uid": "evt_1",
+            "title": {"fr": "Expo Montpellier"},
+            "location": {"city": "Montpellier"},
+            "firstDate": "2025-09-21",
+            "lastDate": "2025-09-21",
+        },
         {
-            "uid": "1",
-            "agenda": {"uid": "42"},
-            "title": {"fr": ""},
-            "description": {"fr": ""},
-            "canonicalUrl": "http://json.com",
-            "firstDate": "2026-03-01",
-            "lastDate": "2026-03-10",
-            "eventType": "Exposition",
-            "location": {
-                "name": "",
-                "city": "Montpellier",
-                "region": "Occitanie",
-            },
-        }
+            "uid": "evt_2",
+            "title": {"fr": "Expo Sète"},
+            "location": {"city": "Sète"},
+            "firstDate": "2025-09-22",
+            "lastDate": "2025-09-22",
+        },
     ]
-    save_events_to_json(events, json_path)
 
-    docs = load_documents(source="json", json_path=json_path)
+    monkeypatch.setattr(ds, "search_agendas_for_zone", lambda zone: agendas)
+    monkeypatch.setattr(ds, "fetch_openagenda_events", lambda agenda_uid, zone, scope: events)
 
+    docs = ds.load_documents(zone="Montpellier", scope="city")
+
+    assert len(docs) == 1
+    assert docs[0].metadata["event_uid"] == "evt_1"
+
+
+def test_load_documents_ignores_agenda_without_uid(monkeypatch):
+    monkeypatch.setattr(ds, "search_agendas_for_zone", lambda zone: [{"uid": ""}, {}])
+
+    docs = ds.load_documents(zone="Montpellier", scope="city")
     assert docs == []
 
 
-def test_load_documents_invalid_source():
-    with pytest.raises(ValueError, match="source doit valoir 'api', 'json' ou 'csv'"):
-        load_documents(source="invalid")
+def test_load_documents_skips_empty_event_lists(monkeypatch):
+    monkeypatch.setattr(ds, "search_agendas_for_zone", lambda zone: [{"uid": "agenda_1"}])
+    monkeypatch.setattr(ds, "fetch_openagenda_events", lambda agenda_uid, zone, scope: [])
+
+    docs = ds.load_documents(zone="Montpellier", scope="city")
+    assert docs == []
+
+
+def test_load_documents_skips_events_without_uid(monkeypatch):
+    monkeypatch.setattr(ds, "search_agendas_for_zone", lambda zone: [{"uid": "agenda_1"}])
+    monkeypatch.setattr(
+        ds,
+        "fetch_openagenda_events",
+        lambda agenda_uid, zone, scope: [
+            {
+                "uid": "",
+                "title": {"fr": "Sans uid"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-21",
+                "lastDate": "2025-09-21",
+            },
+            {
+                "uid": "evt_ok",
+                "title": {"fr": "Avec uid"},
+                "location": {"city": "Montpellier"},
+                "firstDate": "2025-09-21",
+                "lastDate": "2025-09-21",
+            },
+        ],
+    )
+
+    docs = ds.load_documents(zone="Montpellier", scope="city")
+
+    assert len(docs) == 1
+    assert docs[0].metadata["event_uid"] == "evt_ok"

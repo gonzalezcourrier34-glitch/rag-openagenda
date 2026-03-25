@@ -3,14 +3,6 @@ from pathlib import Path
 from app.memory_service import MemoryService
 
 
-def test_normalize_basic():
-    memory = MemoryService()
-
-    result = memory._normalize("  Bonjour,   Montpellier !!! ")
-
-    assert result == "bonjour montpellier"
-
-
 def test_load_memory_file_not_exists(tmp_path: Path):
     memory_file = tmp_path / "missing_memory.json"
     memory = MemoryService(memory_file=str(memory_file))
@@ -61,6 +53,24 @@ def test_save_and_load_memory(tmp_path: Path):
     assert loaded == entries
 
 
+def test_save_memory_creates_parent_directory(tmp_path: Path):
+    memory_file = tmp_path / "nested" / "memory" / "memory.json"
+    memory = MemoryService(memory_file=str(memory_file))
+
+    memory.save_memory(
+        [
+            {
+                "question": "Q1",
+                "answer": "R1",
+                "documents": [],
+            }
+        ]
+    )
+
+    assert memory_file.exists()
+    assert memory_file.parent.exists()
+
+
 def test_clear_memory(tmp_path: Path):
     memory_file = tmp_path / "memory.json"
     memory = MemoryService(memory_file=str(memory_file))
@@ -71,66 +81,6 @@ def test_clear_memory(tmp_path: Path):
     memory.clear()
 
     assert memory.load_memory() == []
-
-
-def test_get_last_entry_empty(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    assert memory.get_last_entry() is None
-
-
-def test_get_last_entry_returns_last(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    memory.save_memory(
-        [
-            {"question": "Q1", "answer": "R1", "documents": []},
-            {"question": "Q2", "answer": "R2", "documents": []},
-        ]
-    )
-
-    last = memory.get_last_entry()
-
-    assert last is not None
-    assert last["question"] == "Q2"
-    assert last["answer"] == "R2"
-
-
-def test_find_exact_question_found_despite_case_and_punctuation(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    memory.save_memory(
-        [
-            {
-                "question": "Je cherche une exposition à Montpellier !",
-                "answer": "Réponse",
-                "documents": [],
-            }
-        ]
-    )
-
-    result = memory.find_exact_question("je cherche une exposition à montpellier")
-
-    assert result is not None
-    assert result["answer"] == "Réponse"
-
-
-def test_find_exact_question_not_found(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    memory.save_memory(
-        [
-            {
-                "question": "Question A",
-                "answer": "Réponse A",
-                "documents": [],
-            }
-        ]
-    )
-
-    result = memory.find_exact_question("Question B")
-
-    assert result is None
 
 
 def test_add_entry(tmp_path: Path):
@@ -152,7 +102,29 @@ def test_add_entry(tmp_path: Path):
     loaded = memory.load_memory()
     assert len(loaded) == 1
     assert loaded[0]["question"] == "Ma question"
+    assert loaded[0]["answer"] == "Ma réponse"
+    assert loaded[0]["documents"] == [{"title": "Doc 1"}]
     assert "created_at" in loaded[0]
+
+
+def test_add_entry_with_none_values(tmp_path: Path):
+    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
+
+    entry = memory.add_entry(
+        question=None,
+        answer=None,
+        documents=None,
+    )
+
+    assert entry["question"] == ""
+    assert entry["answer"] == ""
+    assert entry["documents"] == []
+
+    loaded = memory.load_memory()
+    assert len(loaded) == 1
+    assert loaded[0]["question"] == ""
+    assert loaded[0]["answer"] == ""
+    assert loaded[0]["documents"] == []
 
 
 def test_add_entry_respects_max_entries(tmp_path: Path):
@@ -172,225 +144,78 @@ def test_add_entry_respects_max_entries(tmp_path: Path):
     assert loaded[1]["question"] == "Q3"
 
 
-def test_build_memory_context_found(tmp_path: Path):
+def test_get_recent_entries_empty(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    memory.add_entry(
-        question="Je cherche une exposition",
-        answer="Voici une réponse assez longue",
-    )
+    result = memory.get_recent_entries()
 
-    context = memory.build_memory_context("je cherche une exposition")
-
-    assert "Souvenir pertinent" in context
-    assert "Question passée : Je cherche une exposition" in context
-    assert "Réponse passée : Voici une réponse assez longue" in context
-    assert "Date du souvenir :" in context
+    assert result == []
 
 
-def test_build_memory_context_not_found(tmp_path: Path):
+def test_get_recent_entries_default_limit(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    memory.add_entry(
-        question="Question A",
-        answer="Réponse A",
-    )
+    memory.add_entry("Q1", "R1")
+    memory.add_entry("Q2", "R2")
+    memory.add_entry("Q3", "R3")
+    memory.add_entry("Q4", "R4")
+    memory.add_entry("Q5", "R5")
+    memory.add_entry("Q6", "R6")
 
-    context = memory.build_memory_context("Question B")
+    result = memory.get_recent_entries()
 
-    assert context == ""
+    assert len(result) == 5
+    assert result[0]["question"] == "Q2"
+    assert result[-1]["question"] == "Q6"
 
 
-def test_build_memory_context_max_chars(tmp_path: Path):
+def test_get_recent_entries_custom_limit(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    memory.add_entry(
-        question="Question test",
-        answer="abcdefghijklmnopqrstuvwxyz",
-    )
+    memory.add_entry("Q1", "R1")
+    memory.add_entry("Q2", "R2")
+    memory.add_entry("Q3", "R3")
 
-    context = memory.build_memory_context("Question test", max_chars=5)
+    result = memory.get_recent_entries(limit=2)
 
-    assert "Réponse passée : abcde..." in context
-
-
-def test_extract_choice_number_choix():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("choix 2") == 2
+    assert len(result) == 2
+    assert result[0]["question"] == "Q2"
+    assert result[1]["question"] == "Q3"
 
 
-def test_extract_choice_number_numero():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("numéro 4") == 4
-
-
-def test_extract_choice_number_je_prends():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("je prends le 3") == 3
-
-
-def test_extract_choice_number_je_veux():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("je veux le 1") == 1
-
-
-def test_extract_choice_number_le():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("le 1") == 1
-
-
-def test_extract_choice_number_does_not_confuse_date():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("le 3 mars") is None
-
-
-def test_extract_choice_number_not_found():
-    memory = MemoryService()
-
-    assert memory.extract_choice_number("je veux une exposition") is None
-
-
-def test_build_choice_answer_no_choice_number(tmp_path: Path):
+def test_get_recent_entries_limit_greater_than_entries(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    result = memory.build_choice_answer("je veux une exposition")
+    memory.add_entry("Q1", "R1")
+    memory.add_entry("Q2", "R2")
 
-    assert result is None
+    result = memory.get_recent_entries(limit=10)
+
+    assert len(result) == 2
+    assert result[0]["question"] == "Q1"
+    assert result[1]["question"] == "Q2"
 
 
-def test_build_choice_answer_no_last_entry(tmp_path: Path):
+def test_get_recent_entries_limit_zero_returns_at_least_one_when_entries_exist(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    result = memory.build_choice_answer("choix 1")
+    memory.add_entry("Q1", "R1")
+    memory.add_entry("Q2", "R2")
 
-    assert result is None
+    result = memory.get_recent_entries(limit=0)
+
+    assert len(result) == 1
+    assert result[0]["question"] == "Q2"
 
 
-def test_build_choice_answer_no_documents_in_last_entry(tmp_path: Path):
+def test_get_recent_entries_negative_limit_returns_at_least_one_when_entries_exist(tmp_path: Path):
     memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
 
-    memory.add_entry(
-        question="Question",
-        answer="Réponse",
-        documents=[],
-    )
+    memory.add_entry("Q1", "R1")
+    memory.add_entry("Q2", "R2")
+    memory.add_entry("Q3", "R3")
 
-    result = memory.build_choice_answer("choix 1")
+    result = memory.get_recent_entries(limit=-5)
 
-    assert result is None
-
-
-def test_build_choice_answer_invalid_choice_out_of_range(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    memory.add_entry(
-        question="Question",
-        answer="Réponse",
-        documents=[
-            {
-                "title": "Doc 1",
-                "location_name": "Lieu 1",
-                "city": "Montpellier",
-                "first_date": "2026-03-01",
-                "last_date": "2026-03-01",
-                "event_type": "Exposition",
-                "url": "http://doc1.com",
-            }
-        ],
-    )
-
-    result = memory.build_choice_answer("choix 2")
-
-    assert result is None
-
-
-def test_build_choice_answer_success_same_dates(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    selected_doc = {
-        "title": "Expo Archi",
-        "location_name": "Musée Fabre",
-        "city": "Montpellier",
-        "first_date": "2026-03-01",
-        "last_date": "2026-03-01",
-        "event_type": "Exposition",
-        "url": "http://expo.com",
-    }
-
-    memory.add_entry(
-        question="Question",
-        answer="Réponse",
-        documents=[selected_doc],
-    )
-
-    result = memory.build_choice_answer("choix 1")
-
-    assert result is not None
-    assert result["question"] == "choix 1"
-    assert result["n_docs"] == 1
-    assert result["documents"] == [selected_doc]
-    assert "Voici l'événement correspondant à votre choix :" in result["answer"]
-    assert "Titre : Expo Archi" in result["answer"]
-    assert "Lieu : Musée Fabre" in result["answer"]
-    assert "Ville : Montpellier" in result["answer"]
-    assert "Date : 2026-03-01" in result["answer"]
-    assert "Type d'événement : Exposition" in result["answer"]
-    assert "Lien : http://expo.com" in result["answer"]
-
-
-def test_build_choice_answer_success_date_range(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    selected_doc = {
-        "title": "Festival",
-        "location_name": "Parc",
-        "city": "Sète",
-        "first_date": "2026-04-01",
-        "last_date": "2026-04-05",
-        "event_type": "Festival",
-        "url": "http://festival.com",
-    }
-
-    memory.add_entry(
-        question="Question",
-        answer="Réponse",
-        documents=[selected_doc],
-    )
-
-    result = memory.build_choice_answer("je prends le 1")
-
-    assert result is not None
-    assert "Date : du 2026-04-01 au 2026-04-05" in result["answer"]
-
-
-def test_build_choice_answer_with_last_date_only(tmp_path: Path):
-    memory = MemoryService(memory_file=str(tmp_path / "memory.json"))
-
-    selected_doc = {
-        "title": "Concert",
-        "location_name": "Salle Y",
-        "city": "Sète",
-        "first_date": "",
-        "last_date": "2026-05-10",
-        "event_type": "",
-        "url": "",
-    }
-
-    memory.add_entry(
-        question="Question",
-        answer="Réponse",
-        documents=[selected_doc],
-    )
-
-    result = memory.build_choice_answer("le 1")
-
-    assert result is not None
-    assert "Date : 2026-05-10" in result["answer"]
-    assert "Type d'événement" not in result["answer"]
-    assert "Lien :" not in result["answer"]
+    assert len(result) == 1
+    assert result[0]["question"] == "Q3"

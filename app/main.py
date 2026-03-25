@@ -2,18 +2,23 @@
 Application principale FastAPI pour l'API RAG OpenAgenda.
 
 Ce module expose les endpoints REST de l'application. Il permet :
+
 - de vérifier l'état de l'API
 - de poser une question au système RAG
-- de reconstruire la base documentaire utilisée par le moteur RAG
+- de reconstruire l'index documentaire
+- d'interroger un endpoint de debug pour l'évaluation
 
-Le système repose sur un pipeline Retrieval-Augmented Generation (RAG)
-qui récupère des événements culturels via OpenAgenda, les indexe
-dans FAISS, puis génère une réponse à partir des documents retrouvés.
+L'application s'appuie sur les services internes suivants :
+
+- document_service pour charger les événements OpenAgenda
+- rag_service pour orchestrer le pipeline RAG
+- retrieval_service pour filtrer et reranker les documents candidats
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+import logging
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.responses import RedirectResponse
@@ -24,6 +29,7 @@ from app.rag_service import RAGService
 from app.schemas import (
     AskRequest,
     AskResponse,
+    DebugResponse,
     HealthResponse,
     RebuildRequest,
     RebuildResponse,
@@ -31,37 +37,131 @@ from app.schemas import (
 from app.security import require_api_key
 
 
-app = FastAPI(
-    title="OpenAgenda RAG API",
-    description="API REST locale pour interroger un chatbot RAG d'événements culturels",
-    version="1.0.0",
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 
+logger = logging.getLogger(__name__)
+
+
 rag_service = RAGService()
+
+
+def _initialize_rag_service() -> None:
+    """
+    Initialise le service RAG au démarrage de l'application.
+
+    Stratégie :
+    - si l'index est déjà chargé en mémoire, ne rien faire
+    - sinon, charger l'index depuis le disque s'il existe
+    - sinon, construire un index par défaut à partir du corpus par défaut
+    """
+    if rag_service.is_index_loaded():
+        logger.info("Index déjà chargé en mémoire.")
+        return
+
+    if rag_service.index_dir.exists() and any(rag_service.index_dir.iterdir()):
+        rag_service.load_index()
+        rag_service.set_documents(
+            load_documents(
+                zone=DEFAULT_ZONE,
+                scope=DEFAULT_SCOPE,
+            )
+        )
+        rag_service.zone = DEFAULT_ZONE
+        rag_service.scope = DEFAULT_SCOPE
+        logger.info("Index FAISS chargé depuis le disque.")
+        return
+
+    logger.info("Aucun index trouvé. Construction d'un index par défaut...")
+
+    documents = load_documents(
+        zone=DEFAULT_ZONE,
+        scope=DEFAULT_SCOPE,
+    )
+
+    if not documents:
+        logger.warning(
+            "Aucun document chargé au démarrage. "
+            "L'API restera fonctionnelle mais sans index."
+        )
+        return
+
+    rag_service.zone = DEFAULT_ZONE
+    rag_service.scope = DEFAULT_SCOPE
+    n_docs = rag_service.rebuild_index(documents)
+    logger.info("Index construit avec %s documents.", n_docs)
+
+
+def _raise_http_from_exception(
+    exc: Exception,
+    *,
+    user_log_message: str,
+    server_log_message: str,
+) -> None:
+    """
+    Convertit une exception Python en HTTPException cohérente pour l'API.
+
+    Règles :
+    - FileNotFoundError -> 503
+    - ValueError -> 400
+    - autres erreurs -> 500
+    """
+    if isinstance(exc, FileNotFoundError):
+        logger.exception("%s : index indisponible", server_log_message)
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+    if isinstance(exc, ValueError):
+        logger.warning("%s : %s", user_log_message, exc)
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    logger.exception("%s : erreur interne", server_log_message)
+    raise HTTPException(
+        status_code=500,
+        detail="Erreur interne du serveur.",
+    ) from exc
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """
+    Initialise le service RAG au démarrage de l'application
+    puis journalise l'arrêt propre de l'application.
+    """
+    try:
+        _initialize_rag_service()
+    except Exception:
+        logger.exception("Erreur lors de l'initialisation du service RAG.")
+
+    yield
+
+    logger.info("Arrêt de l'application RAG.")
+
+
+app = FastAPI(
+    title="OpenAgenda RAG API",
+    description=(
+        "API REST locale pour interroger un assistant RAG "
+        "de recommandation d'événements culturels"
+    ),
+    version="1.1.0",
+    lifespan=lifespan,
+)
 
 
 @app.get("/", include_in_schema=False)
 def root() -> RedirectResponse:
     """
-    Redirige la racine de l'API vers la documentation interactive.
-
-    Returns
-    -------
-    RedirectResponse
-        Redirection vers `/docs`.
+    Redirige vers la documentation interactive de l'API.
     """
     return RedirectResponse(url="/docs")
 
 
-@app.get("/health", response_model=HealthResponse, summary="État de l'API")
+@app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     """
-    Vérifie l'état général de l'API.
-
-    Returns
-    -------
-    HealthResponse
-        État global de l'API et disponibilité de l'index vectoriel.
+    Retourne l'état minimal de l'API.
     """
     return HealthResponse(
         status="ok",
@@ -72,157 +172,75 @@ def health() -> HealthResponse:
 @app.post(
     "/ask",
     response_model=AskResponse,
-    summary="Posez une question au chatbot RAG",
     dependencies=[Depends(require_api_key)],
 )
 def ask(payload: AskRequest) -> AskResponse:
     """
-    Interroge le système RAG avec une question utilisateur.
-
-    Parameters
-    ----------
-    payload : AskRequest
-        Corps de requête contenant la question utilisateur.
-
-    Returns
-    -------
-    AskResponse
-        Réponse générée par le système RAG, avec les documents utilisés.
-
-    Raises
-    ------
-    HTTPException
-        400 : question invalide ou erreur de données
-        503 : index vectoriel indisponible
-        500 : erreur interne du serveur
+    Exécute le pipeline RAG standard pour répondre à une question.
     """
     try:
         return rag_service.ask(payload.question)
-
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    except Exception:
-        raise HTTPException(status_code=500, detail="Erreur interne du serveur.")
+    except Exception as exc:
+        _raise_http_from_exception(
+            exc,
+            user_log_message="Erreur utilisateur /ask",
+            server_log_message="Erreur serveur /ask",
+        )
 
 
 @app.post(
     "/ask/debug",
-    summary="Endpoint de debug pour inspection du pipeline RAG",
+    response_model=DebugResponse,
     dependencies=[Depends(require_api_key)],
 )
-def ask_debug(payload: AskRequest) -> dict:
+def ask_debug(payload: AskRequest) -> DebugResponse:
     """
-    Exécute le pipeline RAG en mode debug avec accès complet aux contextes.
-
-    Cet endpoint est destiné à l'analyse, au debugging et à l'évaluation
-    du système RAG. Contrairement à `/ask`, il expose explicitement
-    les documents récupérés ainsi que leur contenu brut.
-
-    Parameters
-    ----------
-    payload : AskRequest
-        Corps de requête contenant la question utilisateur.
-
-    Returns
-    -------
-    dict
-        Dictionnaire contenant :
-        - question : question utilisateur
-        - answer : réponse générée par le modèle
-        - contexts : liste des contenus textuels des documents récupérés
-        - metadata : liste des métadonnées associées aux documents
-
-    Raises
-    ------
-    HTTPException
-        400 : question invalide
-        503 : index vectoriel indisponible
-        500 : erreur interne du serveur
+    Exécute le pipeline RAG avec retour détaillé pour le debug.
     """
     try:
-        question = payload.question.strip()
-        current_date = datetime.today().strftime("%Y-%m-%d")
-
-        if not question:
-            raise ValueError("La question ne peut pas être vide.")
-
-        docs = rag_service.retrieve(question)
-        answer = rag_service.generate(
-            question=question,
-            docs=docs,
-            current_date=current_date,
-        )
-
-        return {
-            "question": question,
-            "answer": answer,
-            "contexts": [doc.page_content for doc in docs],
-            "metadata": [doc.metadata for doc in docs],
-        }
-
-    except FileNotFoundError as exc:
-        raise HTTPException(status_code=503, detail=str(exc))
-
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    except Exception:
-        raise HTTPException(
-            status_code=500,
-            detail="Erreur interne du serveur.",
+        debug_data = rag_service.ask_debug(payload.question)
+        return DebugResponse(**debug_data)
+    except Exception as exc:
+        _raise_http_from_exception(
+            exc,
+            user_log_message="Erreur utilisateur /ask/debug",
+            server_log_message="Erreur serveur /ask/debug",
         )
 
 
 @app.post(
     "/rebuild",
     response_model=RebuildResponse,
-    summary="Reconstruire l'index documentaire",
     dependencies=[Depends(require_api_key)],
 )
 def rebuild(payload: RebuildRequest) -> RebuildResponse:
     """
-    Recharge les documents et reconstruit l'index vectoriel du RAG.
-
-    Parameters
-    ----------
-    payload : RebuildRequest
-        Corps de requête contenant la zone et le scope.
-
-    Returns
-    -------
-    RebuildResponse
-        Statut de l'opération et nombre de documents indexés.
-
-    Raises
-    ------
-    HTTPException
-        400 : aucun document trouvé ou paramètres invalides
-        500 : erreur interne du serveur
+    Reconstruit complètement l'index documentaire.
     """
     try:
         zone = payload.zone or DEFAULT_ZONE
         scope = payload.scope or DEFAULT_SCOPE
 
-        documents = load_documents(zone=zone, scope=scope, source="api")
+        logger.info("Rebuild demandé | zone=%s | scope=%s", zone, scope)
+
+        documents = load_documents(zone=zone, scope=scope)
 
         if not documents:
-            raise ValueError("Aucun document n'a été chargé.")
+            raise ValueError("Aucun document trouvé pour cette zone.")
 
-        rag_service.set_documents(documents)
-        n_docs = rag_service.build_index()
+        rag_service.zone = zone
+        rag_service.scope = scope
+        n_docs = rag_service.rebuild_index(documents)
 
         return RebuildResponse(
             status="success",
-            message="La base d'information a été reconstruite avec succès.",
+            message=f"Index reconstruit avec {n_docs} documents.",
             n_docs_indexed=n_docs,
         )
 
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
-
-    except Exception:
-        raise HTTPException(status_code=500, detail="Erreur interne du serveur.")
+    except Exception as exc:
+        _raise_http_from_exception(
+            exc,
+            user_log_message="Erreur validation /rebuild",
+            server_log_message="Erreur serveur /rebuild",
+        )
