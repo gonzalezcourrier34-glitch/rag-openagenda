@@ -1,4 +1,5 @@
 <h1 align="center">Assistant intelligent de recommandation d’événements culturels</h1>
+
 <p align="center">
   <strong>Proof of Concept basé sur une architecture RAG</strong>
 </p>
@@ -18,7 +19,62 @@
 
 <hr>
 
-<h2>Présentation du projet</h2>
+<h2>Sommaire</h2>
+
+<ul>
+  <li><a href="#quick-start">🚀 Quick Start</a></li>
+  <li><a href="#presentation">🧠 Présentation du projet</a></li>
+  <li><a href="#objectifs">🎯 Objectifs du projet</a></li>
+  <li><a href="#architecture">⚙️ Architecture du système</a></li>
+  <li><a href="#pipeline">🔄 Pipeline RAG</a></li>
+  <li><a href="#donnees">📊 Données et vectorisation</a></li>
+  <li><a href="#modele">🤖 Modèle NLP</a></li>
+  <li><a href="#api">🔌 API</a></li>
+  <li><a href="#tests">🧪 Tests</a></li>
+  <li><a href="#structure">🧱 Structure du projet</a></li>
+  <li><a href="#interface">🖥️ Interface utilisateur</a></li>
+  <li><a href="#infrastructure">📦 Infrastructure</a></li>
+  <li><a href="#limites">⚠️ Limites du prototype</a></li>
+  <li><a href="#ameliorations">🚀 Pistes d’amélioration</a></li>
+  <li><a href="#configuration">⚙️ Configuration</a></li>
+  <li><a href="#lancement">▶️ Lancer le projet</a></li>
+  <li><a href="#auteur">👤 Auteur</a></li>
+  <li><a href="#licence">📄 Licence</a></li>
+</ul>
+
+<hr>
+
+<h2 id="quick-start">🚀 Quick Start</h2>
+
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Lancer rapidement le projet dans un environnement local reproductible, reconstruire l’index vectoriel, puis interroger l’assistant depuis l’interface Streamlit.
+</div>
+
+<pre><code>git clone repo_url
+cd pocrag
+cp .env.example .env
+docker compose up --build</code></pre>
+
+<p><strong>Puis :</strong></p>
+
+<ol>
+  <li>ouvrir <code>http://localhost:8501</code></li>
+  <li>aller dans <strong>Administration</strong></li>
+  <li>cliquer sur <strong>Rebuild /rebuild</strong></li>
+  <li>revenir dans <strong>Chat</strong></li>
+  <li>poser une question</li>
+</ol>
+
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
+  <strong>⚠️ Important</strong><br><br>
+  Le système <strong>ne fonctionne pas tant que l’index n’est pas construit</strong>.<br>
+  Il faut exécuter <code>/rebuild</code> avant toute première utilisation.
+</div>
+
+<hr>
+
+<h2 id="presentation">🧠 Présentation du projet</h2>
 
 <p>
 Dans ce projet, j’ai conçu un assistant intelligent capable de recommander des événements culturels à partir d’une question formulée en langage naturel.
@@ -39,39 +95,40 @@ Ce projet m’a permis de travailler sur une chaîne complète, depuis la collec
   <li>génération de réponse avec un LLM</li>
   <li>exposition du système via API FastAPI</li>
   <li>développement d’une interface utilisateur Streamlit</li>
-  <li>containerisation avec Docker</li>
+  <li>conteneurisation avec Docker</li>
   <li>mise en place d’une logique CI/CD avec GitHub Actions</li>
 </ul>
 
 <hr>
 
-<h2>1. Objectifs du projet</h2>
+<h2 id="objectifs">🎯 Objectifs du projet</h2>
 
-<h3>Contexte</h3>
+<h3 style="color: #48C9B0;">Contexte</h3>
 
 <p>
 Dans le cadre de ce Proof of Concept, l’entreprise fictive <strong>Puls-Events</strong> souhaite proposer un outil capable d’aider un utilisateur à trouver plus facilement des événements culturels correspondant à ses attentes.
 </p>
 
 <p>
-Les moteurs de recherche classiques montrent rapidement leurs limites lorsque la demande est formulée librement, avec des besoins parfois flous, implicites ou insuffisamment structurés.
+Les moteurs de recherche classiques montrent rapidement leurs limites lorsque la demande est formulée librement, avec des besoins parfois flous, implicites ou peu structurés.
 </p>
 
-<h3>Problématique</h3>
+<h3 style="color: #48C9B0;">Problématique</h3>
 
 <p>
-La difficulté consiste donc à concevoir un système capable de comprendre une question exprimée naturellement, de retrouver les événements les plus pertinents, puis de formuler une réponse utile sans inventer d’informations.
+La difficulté consiste à concevoir un système capable de comprendre une question exprimée naturellement, de retrouver les événements les plus pertinents, puis de formuler une réponse utile sans inventer d’informations.
 </p>
 
 <p>
 C’est précisément l’intérêt d’une architecture RAG, qui combine une phase de recherche documentaire et une phase de génération.
 </p>
 
-<h3>Objectif du POC</h3>
+<h3 style="color: #48C9B0;">Objectif du POC</h3>
 
-<p>
-Avec ce prototype, j’ai cherché à démontrer la faisabilité technique d’un assistant de recommandation culturelle reposant sur :
-</p>
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Avec ce prototype, j’ai cherché à démontrer la faisabilité technique d’un assistant de recommandation culturelle reposant sur des données réelles, une recherche vectorielle, un modèle de langage contraint par le contexte et une architecture modulaire exposée via API et dashboard.
+</div>
 
 <ul>
   <li>des données réelles issues d’une API externe</li>
@@ -93,7 +150,7 @@ L’objectif est qu’un utilisateur puisse poser une question comme :
 et obtenir une réponse générée à partir d’événements réellement présents dans les données chargées.
 </p>
 
-<h3>Périmètre</h3>
+<h3 style="color: #48C9B0;">Périmètre</h3>
 
 <ul>
   <li><strong>Source de données :</strong> API OpenAgenda</li>
@@ -104,7 +161,7 @@ et obtenir une réponse générée à partir d’événements réellement prése
 
 <hr>
 
-<h2>2. Architecture du système</h2>
+<h2 id="architecture">⚙️ Architecture du système</h2>
 
 <p>
 L’architecture repose sur une chaîne de traitement modulaire dans laquelle chaque composant remplit un rôle précis.
@@ -129,8 +186,7 @@ RAGService
  └── Mistral → génération de réponse
      │
      ▼
-Réponse + documents sources
-</code></pre>
+Réponse + documents sources</code></pre>
 
 <p>
 Dans la version conteneurisée du projet, cette logique s’intègre dans une architecture plus large :
@@ -145,8 +201,7 @@ api (FastAPI)
         ├── FAISS
         ├── mémoire locale
         ├── PostgreSQL
-        └── MLflow
-</code></pre>
+        └── MLflow</code></pre>
 
 <p>
 Ce découpage m’a permis de séparer clairement :
@@ -165,15 +220,34 @@ Ce découpage m’a permis de séparer clairement :
 
 <hr>
 
-<h2>3. Préparation et vectorisation des données</h2>
+<h2 id="pipeline">🔄 Pipeline RAG</h2>
 
-<h3>Source de données</h3>
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+  <strong>Objectif</strong><br><br>
+  Transformer une question en langage naturel en une réponse fiable, fondée sur des documents réellement retrouvés dans la base événementielle.
+</div>
+
+<pre><code>1. Préfiltrage des documents (ville, date, type d’événement)
+2. Recherche vectorielle via FAISS
+3. Ranking métier des candidats
+4. Construction du contexte final
+5. Génération de la réponse avec le LLM</code></pre>
+
+<p>
+Cette organisation permet de mieux contrôler la qualité des résultats et de limiter les réponses déconnectées des données disponibles.
+</p>
+
+<hr>
+
+<h2 id="donnees">📊 Données et vectorisation</h2>
+
+<h3 style="color: #48C9B0;">Source de données</h3>
 
 <p>
 Les données proviennent de l’API <strong>OpenAgenda</strong>. Les événements sont récupérés à l’aide de requêtes paginées, en filtrant selon une zone géographique et un périmètre définis dans la configuration.
 </p>
 
-<h3>Persistance des données</h3>
+<h3 style="color: #48C9B0;">Persistance des données</h3>
 
 <p>
 Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> dans le répertoire <code>data/</code>.
@@ -190,7 +264,7 @@ Cette étape me permet :
   <li>de structurer plus proprement le projet entre données brutes et données préparées</li>
 </ul>
 
-<h3>Préparation des données</h3>
+<h3 style="color: #48C9B0;">Préparation des données</h3>
 
 <p>
 Les événements bruts sont ensuite normalisés afin d’obtenir une structure cohérente. Cette étape m’a permis :
@@ -203,7 +277,7 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
   <li>de préparer les métadonnées utiles pour l’affichage, le filtrage et la recherche</li>
 </ul>
 
-<h3>Chunking</h3>
+<h3 style="color: #48C9B0;">Chunking</h3>
 
 <p>
 Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement comme un document unique</strong>. Ce choix est adapté au format des données et au périmètre du prototype.
@@ -223,15 +297,25 @@ Le texte utilisé pour la vectorisation est construit à partir des informations
   <li>type d’événement</li>
 </ul>
 
-<h3>Embeddings</h3>
+<h3 style="color: #48C9B0;">Embeddings</h3>
 
 <p>
 Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral</strong>. Chaque document est transformé en vecteur puis ajouté dans un index <strong>FAISS</strong> afin de permettre une recherche sémantique rapide.
 </p>
 
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
+  <strong>⚠️ Important</strong><br><br>
+  La qualité des réponses dépend directement :
+  <ul>
+    <li>des événements réellement disponibles dans OpenAgenda</li>
+    <li>de la zone choisie</li>
+    <li>de la période configurée</li>
+  </ul>
+</div>
+
 <hr>
 
-<h2>4. Choix du modèle NLP</h2>
+<h2 id="modele">🤖 Modèle NLP</h2>
 
 <p>
 Pour la génération de réponses, j’ai choisi <strong>Mistral Small</strong>.
@@ -257,7 +341,7 @@ La principale limite reste la dépendance à la qualité du retrieval. Si les do
 
 <hr>
 
-<h2>5. Construction de la base vectorielle</h2>
+<h2>🧠 Base vectorielle</h2>
 
 <p>
 La base vectorielle est construite avec <strong>FAISS</strong>. Une fois les embeddings générés, les documents sont stockés dans l’index puis sauvegardés localement.
@@ -289,13 +373,13 @@ Chaque document conserve également des métadonnées utiles, notamment :
 
 <hr>
 
-<h2>6. API et endpoints exposés</h2>
+<h2 id="api">🔌 API</h2>
 
 <p>
 J’ai développé l’API avec <strong>FastAPI</strong> afin d’exposer le système sous forme de service REST.
 </p>
 
-<h3><code>/health</code></h3>
+<h3 style="color: #48C9B0;"><code>/health</code></h3>
 
 <p>
 Permet de vérifier l’état du service et de savoir si l’index vectoriel est chargé.
@@ -306,7 +390,7 @@ Permet de vérifier l’état du service et de savoir si l’index vectoriel est
   "index_loaded": true
 }</code></pre>
 
-<h3><code>/ask</code></h3>
+<h3 style="color: #48C9B0;"><code>/ask</code></h3>
 
 <p>
 Permet de poser une question au système RAG.
@@ -320,12 +404,18 @@ Permet de poser une question au système RAG.
 
 <pre><code>{
   "question": "...",
-  "answer": "...",
+  "answer": "Voici quelques événements à Montpellier...",
   "n_docs": 3,
-  "documents": [...]
+  "documents": [
+    {
+      "title": "Exposition ...",
+      "date": "2025-09-21",
+      "lieu": "Musée Fabre"
+    }
+  ]
 }</code></pre>
 
-<h3><code>/rebuild</code></h3>
+<h3 style="color: #48C9B0;"><code>/rebuild</code></h3>
 
 <p>
 Permet de reconstruire la base documentaire et l’index vectoriel à partir des données OpenAgenda.
@@ -337,9 +427,7 @@ Cet endpoint joue un rôle central lors du premier démarrage, car l’API doit 
 
 <hr>
 
-<h2>7. Qualité logicielle, tests et CI/CD</h2>
-
-<h3>Tests</h3>
+<h2 id="tests">🧪 Tests</h2>
 
 <p>
 Afin de fiabiliser le projet, j’ai mis en place une base de tests automatisés sur les composants essentiels du système, notamment l’API, certains services applicatifs et les comportements attendus sur les endpoints principaux.
@@ -355,89 +443,17 @@ Cette démarche permet de vérifier plus facilement :
   <li>la non-régression sur les fonctionnalités principales du prototype</li>
 </ul>
 
-<h3>CI</h3>
+<p><strong>Lancer les tests :</strong></p>
 
-<p>
-Le dépôt GitHub intègre une chaîne d’intégration continue avec <strong>GitHub Actions</strong>. À chaque mise à jour du code, le pipeline peut exécuter automatiquement les étapes de contrôle qualité, comme l’installation de l’environnement, l’exécution des tests et la vérification du bon état global du projet.
-</p>
+<pre><code>pytest</code></pre>
 
-<h3>CD</h3>
+<p><strong>Avec couverture :</strong></p>
 
-<p>
-Dans une logique de déploiement continu, l’architecture du projet a également été pensée pour pouvoir s’intégrer à une chaîne de livraison plus reproductible, notamment grâce à Docker, à la structuration du dépôt et à la séparation claire entre services.
-</p>
-
-<p>
-Cette partie permet de rapprocher le prototype d’un fonctionnement plus industriel, même dans le cadre d’un POC.
-</p>
+<pre><code>pytest --cov=app</code></pre>
 
 <hr>
 
-<h2>8. Évaluation du système</h2>
-
-<p>
-Pour évaluer le prototype, j’ai constitué un ensemble de questions couvrant plusieurs cas d’usage :
-</p>
-
-<ul>
-  <li>questions positives avec réponse attendue claire</li>
-  <li>questions ambiguës avec plusieurs réponses possibles</li>
-  <li>questions négatives sans événement correspondant</li>
-</ul>
-
-<p>
-L’évaluation a combiné une analyse qualitative et des métriques automatiques sur :
-</p>
-
-<ul>
-  <li>la fidélité de la réponse par rapport au contexte</li>
-  <li>la pertinence de la réponse</li>
-  <li>la précision et le rappel des contextes retrouvés</li>
-  <li>la capacité du système à ne pas inventer d’informations</li>
-</ul>
-
-<p>
-Cette phase m’a également permis d’identifier plusieurs pistes d’amélioration sur le préfiltrage, la gestion des ambiguïtés, le ranking métier et le traitement des contraintes temporelles.
-</p>
-
-<hr>
-
-<h2>9. Recommandations et perspectives</h2>
-
-<h3>Ce qui fonctionne bien</h3>
-
-<ul>
-  <li>le système comprend des questions formulées naturellement</li>
-  <li>la recherche sémantique retrouve des événements cohérents</li>
-  <li>la réponse générée reste lisible et exploitable</li>
-  <li>la mémoire locale améliore certains échanges de suivi</li>
-  <li>l’architecture modulaire facilite les évolutions futures</li>
-</ul>
-
-<h3>Limites du prototype</h3>
-
-<ul>
-  <li>la qualité dépend fortement des données disponibles dans OpenAgenda</li>
-  <li>le volume d’événements peut rester limité selon la zone ou la période choisie</li>
-  <li>le filtrage métier reste encore perfectible</li>
-  <li>les coûts peuvent augmenter avec les embeddings et les appels LLM</li>
-</ul>
-
-<h3>Améliorations possibles</h3>
-
-<ul>
-  <li>ajout d’un reranking plus avancé des documents</li>
-  <li>amélioration du filtrage par métadonnées</li>
-  <li>mise en place d’une recherche hybride vectorielle et lexicale</li>
-  <li>mémoire conversationnelle plus évoluée</li>
-  <li>déploiement cloud</li>
-  <li>monitoring plus complet</li>
-  <li>renforcement du pipeline CI/CD</li>
-</ul>
-
-<hr>
-
-<h2>10. Organisation du dépôt GitHub</h2>
+<h2 id="structure">🧱 Structure du projet</h2>
 
 <pre><code>project/
 │
@@ -461,9 +477,7 @@ Cette phase m’a également permis d’identifier plusieurs pistes d’amélior
 │   └── index/
 │
 ├── docs/
-│
 ├── tests/
-│
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml
@@ -475,8 +489,7 @@ Cette phase m’a également permis d’identifier plusieurs pistes d’amélior
 ├── .env.example
 ├── pyproject.toml
 ├── README.md
-└── mkdocs.yml
-</code></pre>
+└── mkdocs.yml</code></pre>
 
 <p>
 Chaque module correspond à une brique du système, ce qui rend le projet plus lisible, plus modulaire et plus facile à faire évoluer.
@@ -484,11 +497,13 @@ Chaque module correspond à une brique du système, ce qui rend le projet plus l
 
 <hr>
 
-<h2>11. Interface utilisateur</h2>
+<h2 id="interface">🖥️ Interface utilisateur</h2>
 
 <p>
-J’ai également développé une interface <strong>Streamlit</strong> pour faciliter l’utilisation du système. Elle permet de :
+J’ai également développé une interface <strong>Streamlit</strong> pour faciliter l’utilisation du système.
 </p>
+
+<p>Elle permet de :</p>
 
 <ul>
   <li>poser une question</li>
@@ -500,21 +515,21 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
 
 <hr>
 
-<h2>12. Suivi expérimental et infrastructure</h2>
+<h2 id="infrastructure">📦 Infrastructure</h2>
 
-<h3>MLflow</h3>
+<h3 style="color: #48C9B0;">MLflow</h3>
 
 <p>
 J’ai intégré <strong>MLflow</strong> afin de disposer d’un espace dédié au suivi expérimental et à la centralisation de certains essais liés au projet.
 </p>
 
-<h3>PostgreSQL</h3>
+<h3 style="color: #48C9B0;">PostgreSQL</h3>
 
 <p>
 J’ai ajouté <strong>PostgreSQL</strong> comme base de données afin de préparer une architecture plus solide et plus proche d’un environnement applicatif réel.
 </p>
 
-<h3>Docker</h3>
+<h3 style="color: #48C9B0;">Docker</h3>
 
 <p>
 L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> et orchestré avec <strong>Docker Compose</strong>. Cette approche me permet de lancer la stack avec une seule commande et d’obtenir un environnement reproductible.
@@ -529,7 +544,37 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
 
 <hr>
 
-<h2>Prérequis</h2>
+<h2 id="limites">⚠️ Limites du prototype</h2>
+
+<ul>
+  <li>la qualité dépend fortement des données disponibles dans OpenAgenda</li>
+  <li>le volume d’événements peut rester limité selon la zone ou la période choisie</li>
+  <li>le filtrage métier reste encore perfectible</li>
+  <li>les coûts peuvent augmenter avec les embeddings et les appels LLM</li>
+  <li>pas encore de recherche hybride vectorielle et lexicale</li>
+  <li>pas encore de reranking avancé de type cross-encoder</li>
+</ul>
+
+<hr>
+
+<h2 id="ameliorations">🚀 Pistes d’amélioration</h2>
+
+<ul>
+  <li>ajout d’un reranking plus avancé des documents</li>
+  <li>amélioration du filtrage par métadonnées</li>
+  <li>mise en place d’une recherche hybride vectorielle et lexicale</li>
+  <li>mémoire conversationnelle plus évoluée</li>
+  <li>déploiement cloud</li>
+  <li>monitoring plus complet</li>
+  <li>renforcement du pipeline CI/CD</li>
+  <li>mise en cache des embeddings</li>
+</ul>
+
+<hr>
+
+<h2 id="configuration">⚙️ Configuration</h2>
+
+<h3 style="color: #48C9B0;">Prérequis</h3>
 
 <ul>
   <li>Docker</li>
@@ -538,16 +583,7 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
   <li>une clé API OpenAgenda</li>
 </ul>
 
-<hr>
-
-<h2>Installation</h2>
-
-<h3>1. Cloner le projet</h3>
-
-<pre><code>git clone repo_url
-cd pocrag</code></pre>
-
-<h3>2. Créer le fichier d’environnement</h3>
+<h3 style="color: #48C9B0;">Variables d’environnement</h3>
 
 <p>
 Copier le fichier d’exemple puis compléter les variables nécessaires :
@@ -575,11 +611,18 @@ API_URL=http://api:8000
 ZONE_CHOISIE=Montpellier
 TYPE_ZONE=city</code></pre>
 
+<p><strong>Variables critiques :</strong></p>
+
+<ul>
+  <li><code>OPENAGENDA_API_KEY</code></li>
+  <li><code>API_KEY</code></li>
+</ul>
+
 <hr>
 
-<h2>Lancer le projet</h2>
+<h2 id="lancement">▶️ Lancer le projet</h2>
 
-<h3>1. Construire et démarrer les services</h3>
+<h3 style="color: #48C9B0;">1. Construire et démarrer les services</h3>
 
 <pre><code>docker compose up --build</code></pre>
 
@@ -587,7 +630,7 @@ TYPE_ZONE=city</code></pre>
 
 <pre><code>docker compose up --build -d</code></pre>
 
-<h3>2. Vérifier les services</h3>
+<h3 style="color: #48C9B0;">2. Vérifier les services</h3>
 
 <ul>
   <li><strong>API FastAPI :</strong> <code>http://localhost:8000</code></li>
@@ -596,7 +639,7 @@ TYPE_ZONE=city</code></pre>
   <li><strong>MLflow :</strong> <code>http://localhost:5000</code></li>
 </ul>
 
-<h3>3. Initialiser le système RAG</h3>
+<h3 style="color: #48C9B0;">3. Initialiser le système RAG</h3>
 
 <p>
 Lors du premier démarrage, l’index vectoriel n’est pas encore construit. Il est donc nécessaire d’exécuter une reconstruction avant d’utiliser l’endpoint <code>/ask</code>.
@@ -622,7 +665,7 @@ Elle peut également être réalisée directement via l’API :
   -H "x-api-key: votre_token_api_perso" \
   -d "{\"zone\":\"Montpellier\",\"scope\":\"city\"}"</code></pre>
 
-<h3>4. Interroger le système</h3>
+<h3 style="color: #48C9B0;">4. Interroger le système</h3>
 
 <p>
 Une fois l’index reconstruit, il est possible de poser une question depuis le dashboard ou directement via l’API.
@@ -633,7 +676,7 @@ Une fois l’index reconstruit, il est possible de poser une question depuis le 
   -H "x-api-key: votre_token_api_perso" \
   -d "{\"question\":\"Je cherche une exposition d'architecture à Montpellier\"}"</code></pre>
 
-<h3>5. Arrêter les services</h3>
+<h3 style="color: #48C9B0;">5. Arrêter les services</h3>
 
 <pre><code>docker compose down</code></pre>
 
@@ -643,16 +686,14 @@ Une fois l’index reconstruit, il est possible de poser une question depuis le 
 
 <hr>
 
-<h2>Résumé rapide</h2>
+<h2>📌 Résumé rapide</h2>
 
 <pre><code>git clone repo_url
 cd pocrag
 cp .env.example .env
 docker compose up --build</code></pre>
 
-<p>
-Puis :
-</p>
+<p>Puis :</p>
 
 <ol>
   <li>ouvrir <code>http://localhost:8501</code></li>
@@ -664,7 +705,7 @@ Puis :
 
 <hr>
 
-<h2>Auteur</h2>
+<h2 id="auteur">👤 Auteur</h2>
 
 <p>
 Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un apprentissage autour des architectures RAG, des applications LLM et des systèmes d’IA applicatifs.
@@ -672,6 +713,6 @@ Projet réalisé par <strong>Stéphane GONZALEZ</strong> dans le cadre d’un ap
 
 <hr>
 
-<h2>Licence</h2>
+<h2 id="licence">📄 Licence</h2>
 
 <p>Usage éducatif.</p>
