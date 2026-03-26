@@ -1,3 +1,7 @@
+from __future__ import annotations
+
+from datetime import date, datetime
+
 import pytest
 from langchain_core.documents import Document
 from langchain_core.runnables import RunnableLambda
@@ -18,11 +22,13 @@ def fake_llm_factory(*args, **kwargs):
     return RunnableLambda(lambda x: "Réponse simulée")
 
 
-class FakeChain:
+class CapturingChain:
     def __init__(self, answer="Réponse simulée"):
         self.answer = answer
+        self.calls = []
 
     def invoke(self, payload):
+        self.calls.append(payload)
         return self.answer
 
 
@@ -30,9 +36,14 @@ class FakeVectorStore:
     def __init__(self, documents=None, results_with_scores=None):
         self.documents = documents or []
         self.results_with_scores = results_with_scores or []
+        self.saved_path = None
 
     def save_local(self, path):
+        self.saved_path = path
         return None
+
+    def add_documents(self, docs):
+        self.documents.extend(docs)
 
     def similarity_search_with_score(self, query, k=3):
         return self.results_with_scores[:k]
@@ -111,9 +122,22 @@ class FakeFAISSFactory:
 class FakeMemoryService:
     def __init__(self):
         self.messages = []
+        self.history_text = ""
+        self.history_messages = []
 
-    def format_history_for_prompt(self, session_id: str) -> str:
-        return ""
+    def format_history_for_prompt(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> str:
+        return self.history_text
+
+    def get_recent_messages(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ):
+        return self.history_messages
 
     def append_message(self, session_id: str, role: str, content: str) -> None:
         self.messages.append(
@@ -124,8 +148,17 @@ class FakeMemoryService:
             }
         )
 
+    def append_turn(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        self.append_message(session_id, "user", user_message)
+        self.append_message(session_id, "assistant", assistant_message)
+
     def get_history(self, session_id: str):
-        return []
+        return self.history_messages
 
     def reset_memory(self) -> None:
         pass
@@ -158,6 +191,8 @@ def sample_documents():
                 "source_url": "http://test.com",
                 "content_quality": 8,
                 "search_text": "exposition architecture montpellier musee x",
+                "final_score": 0.9,
+                "diversified_score": 0.8,
             },
         ),
         Document(
@@ -197,6 +232,7 @@ def patched_rag(monkeypatch):
     monkeypatch.setattr("app.rag_service.RetrievalService", FakeRetrievalService)
     monkeypatch.setattr("app.rag_service.TraceService", FakeTraceService)
     monkeypatch.setattr("app.rag_service.MemoryService", FakeMemoryService)
+    monkeypatch.setattr("app.rag_service.time.sleep", lambda _: None)
 
     return fake_faiss
 
@@ -296,8 +332,65 @@ def test_ensure_index_ready_builds_index_when_missing(
     assert rag.documents == sample_documents
 
 
+def test_ensure_index_ready_raises_when_no_documents_loaded(patched_rag, monkeypatch, tmp_path):
+    rag = RAGService(index_dir=tmp_path / "faiss_index", documents=[])
+
+    monkeypatch.setattr("app.rag_service.load_documents", lambda zone, scope: [])
+
+    with pytest.raises(ValueError, match="Aucun index FAISS disponible"):
+        rag.ensure_index_ready()
+
+
 # -------------------------------------------------------------------------
-# Helpers
+# Retry
+# -------------------------------------------------------------------------
+
+def test_execute_with_retry_retries_after_429_then_succeeds(patched_rag):
+    rag = RAGService()
+    state = {"count": 0}
+
+    def flaky():
+        state["count"] += 1
+        if state["count"] == 1:
+            raise Exception("429 Too Many Requests")
+        return "ok"
+
+    result = rag._execute_with_retry(flaky, max_retries=3)
+
+    assert result == "ok"
+    assert state["count"] == 2
+
+
+def test_execute_with_retry_raises_after_exhausting_retries(patched_rag):
+    rag = RAGService()
+    state = {"count": 0}
+
+    def always_fail():
+        state["count"] += 1
+        raise Exception("429 Too Many Requests")
+
+    with pytest.raises(Exception, match="429 Too Many Requests"):
+        rag._execute_with_retry(always_fail, max_retries=2)
+
+    assert state["count"] == 2
+
+
+def test_execute_with_retry_raises_immediately_for_non_429_error(patched_rag):
+    rag = RAGService()
+    state = {"count": 0}
+
+    def fail():
+        state["count"] += 1
+        raise RuntimeError("boom")
+
+    with pytest.raises(RuntimeError, match="boom"):
+        rag._execute_with_retry(fail, max_retries=5)
+
+    assert state["count"] == 1
+
+
+# -------------------------------------------------------------------------
+# Helpers index / retrieval
 # -------------------------------------------------------------------------
 
 def test_build_docs_for_vector_index_uses_search_text(patched_rag, sample_documents):
@@ -368,6 +461,186 @@ def test_post_filter_ranked_docs_prefers_reliable_docs(patched_rag, sample_docum
     assert docs[0].metadata["title"] == "Expo Archi"
 
 
+def test_post_filter_ranked_docs_returns_empty_when_input_empty(patched_rag):
+    rag = RAGService()
+
+    assert rag._post_filter_ranked_docs([]) == []
+
+
+def test_post_filter_ranked_docs_falls_back_to_original_docs_when_none_are_reliable(patched_rag):
+    rag = RAGService(top_k_final=1)
+    poor_doc = Document(
+        page_content="x",
+        metadata={
+            "title": "",
+            "first_date": "",
+            "location_name": "",
+            "city": "",
+            "source_url": "",
+            "content_quality": 1,
+        },
+    )
+
+    result = rag._post_filter_ranked_docs([poor_doc])
+
+    assert result == [poor_doc]
+
+
+# -------------------------------------------------------------------------
+# Mémoire conversationnelle
+# -------------------------------------------------------------------------
+
+def test_get_recent_history_text_strips_memory_text(patched_rag):
+    rag = RAGService()
+    rag.memory_service.history_text = "  Utilisateur : bonjour  "
+
+    result = rag._get_recent_history_text("session-1", max_messages=4)
+
+    assert result == "Utilisateur : bonjour"
+
+
+def test_get_recent_history_messages_returns_memory_messages(patched_rag):
+    rag = RAGService()
+    rag.memory_service.history_messages = [
+        {"role": "user", "content": "Bonjour"},
+        {"role": "assistant", "content": "Salut"},
+    ]
+
+    result = rag._get_recent_history_messages("session-1", max_messages=4)
+
+    assert result == [
+        {"role": "user", "content": "Bonjour"},
+        {"role": "assistant", "content": "Salut"},
+    ]
+
+
+def test_rewrite_question_with_history_returns_original_question_when_history_is_empty(patched_rag):
+    rag = RAGService()
+    rag.memory_service.history_text = ""
+
+    result = rag._rewrite_question_with_history("Et les gratuites ?", "session-1")
+
+    assert result == "Et les gratuites ?"
+
+
+def test_rewrite_question_with_history_uses_rewrite_chain_when_history_exists(patched_rag):
+    rag = RAGService()
+    rag.memory_service.history_text = "Utilisateur : Je cherche une exposition à Montpellier"
+    rag.rewrite_chain = CapturingChain("Je cherche des expositions gratuites à Montpellier")
+
+    result = rag._rewrite_question_with_history("Et les gratuites ?", "session-1")
+
+    assert result == "Je cherche des expositions gratuites à Montpellier"
+    assert rag.rewrite_chain.calls[0]["question"] == "Et les gratuites ?"
+    assert "Montpellier" in rag.rewrite_chain.calls[0]["history"]
+
+
+def test_rewrite_question_with_history_returns_original_when_rewrite_chain_returns_blank(patched_rag):
+    rag = RAGService()
+    rag.memory_service.history_text = "Utilisateur : Je cherche une exposition"
+    rag.rewrite_chain = CapturingChain("   ")
+
+    result = rag._rewrite_question_with_history("Et les gratuites ?", "session-1")
+
+    assert result == "Et les gratuites ?"
+
+
+# -------------------------------------------------------------------------
+# Sérialisation / debug
+# -------------------------------------------------------------------------
+
+def test_serialize_for_json_handles_nested_dates_and_sets(patched_rag):
+    rag = RAGService()
+
+    payload = {
+        "date": date(2026, 3, 26),
+        "datetime": datetime(2026, 3, 26, 10, 30, 0),
+        "nested": {"values": [1, 2, {3, 4}]},
+    }
+
+    result = rag._serialize_for_json(payload)
+
+    assert result["date"] == "2026-03-26"
+    assert result["datetime"].startswith("2026-03-26T10:30:00")
+    assert sorted(result["nested"]["values"][2]) == [3, 4]
+
+
+def test_sanitize_filter_debug_returns_none_when_input_is_none(patched_rag):
+    rag = RAGService()
+
+    assert rag._sanitize_filter_debug(None) is None
+
+
+def test_sanitize_filter_debug_returns_expected_shape(patched_rag):
+    rag = RAGService()
+
+    debug_data = {
+        "filters": {"date": date(2026, 3, 26)},
+        "n_input_docs": 10,
+        "n_after_city": 8,
+        "n_after_type": 7,
+        "n_after_music": 6,
+        "n_after_cultural": 5,
+        "n_after_audience": 4,
+        "n_after_duration": 3,
+        "n_after_date": 2,
+        "n_after_price": 1,
+    }
+
+    result = rag._sanitize_filter_debug(debug_data)
+
+    assert result["filters"]["date"] == "2026-03-26"
+    assert result["n_input_docs"] == 10
+    assert result["n_after_price"] == 1
+
+
+# -------------------------------------------------------------------------
+# Trace helpers
+# -------------------------------------------------------------------------
+
+def test_doc_to_trace_row_returns_expected_fields(patched_rag, sample_documents):
+    rag = RAGService()
+
+    row = rag._doc_to_trace_row(sample_documents[0])
+
+    assert row["title"] == "Expo Archi"
+    assert row["location_name"] == "Musée X"
+    assert row["city"] == "Montpellier"
+    assert row["event_type"] == "exposition"
+    assert row["url"] == "http://test.com"
+    assert row["final_score"] == 0.9
+    assert row["diversified_score"] == 0.8
+
+
+def test_trace_pipeline_writes_serialized_payload(patched_rag, sample_documents):
+    rag = RAGService()
+    rag.trace_service = FakeTraceService()
+
+    rag._trace_pipeline(
+        question="Question originale",
+        effective_question="Question reformulée",
+        session_id="session-1",
+        history=[{"role": "user", "content": "Bonjour"}],
+        filter_debug={"filters": {}, "n_input_docs": 2},
+        fallback_filter_debug=None,
+        prefiltered_docs=sample_documents,
+        raw_docs=sample_documents[:1],
+        ranked_docs=sample_documents[:1],
+        final_docs=sample_documents[:1],
+        context="Contexte test",
+        answer="Réponse test",
+        fallback_used=False,
+    )
+
+    assert len(rag.trace_service.payloads) == 1
+    payload = rag.trace_service.payloads[0]
+    assert payload["question"] == "Question originale"
+    assert payload["effective_question"] == "Question reformulée"
+    assert payload["session_id"] == "session-1"
+    assert payload["history"] == [{"role": "user", "content": "Bonjour"}]
+    assert payload["answer"] == "Réponse test"
+
+
 # -------------------------------------------------------------------------
 # Retrieval
 # -------------------------------------------------------------------------
@@ -397,6 +670,30 @@ def test_run_vector_retrieval_returns_scored_docs(patched_rag, sample_documents,
     assert docs[1].metadata["vector_score"] == 0.22
 
 
+def test_run_vector_retrieval_returns_empty_when_candidate_docs_empty(patched_rag):
+    rag = RAGService()
+
+    result = rag._run_vector_retrieval("architecture", [])
+
+    assert result == []
+
+
+def test_run_vector_retrieval_returns_empty_when_local_search_returns_no_results(
+    patched_rag, monkeypatch, sample_documents
+):
+    rag = RAGService()
+
+    monkeypatch.setattr(
+        rag,
+        "_build_local_vectorstore",
+        lambda docs: FakeVectorStore(results_with_scores=[]),
+    )
+
+    result = rag._run_vector_retrieval("architecture", sample_documents)
+
+    assert result == []
+
+
 def test_retrieve_returns_docs_from_pipeline(patched_rag, sample_documents, monkeypatch):
     rag = RAGService()
     monkeypatch.setattr(
@@ -409,6 +706,12 @@ def test_retrieve_returns_docs_from_pipeline(patched_rag, sample_documents, monk
 
     assert len(docs) == 1
     assert docs[0].metadata["title"] == "Expo Archi"
+
+
+def test_build_relaxed_question_strips_input(patched_rag):
+    rag = RAGService()
+
+    assert rag._build_relaxed_question("  question test  ") == "question test"
 
 
 def test_prefilter_with_fallback_uses_fallback_when_main_empty(patched_rag, sample_documents):
@@ -521,7 +824,7 @@ def test_build_retrieved_document(patched_rag, sample_documents):
     assert retrieved.price_info == "gratuit"
     assert retrieved.is_free is True
     assert retrieved.keywords_title == ["expo", "archi"]
-    assert retrieved.score is None
+    assert retrieved.score == 0.9
 
 
 def test_build_retrieved_documents_returns_list(patched_rag, sample_documents):
@@ -545,20 +848,38 @@ def test_generate_answer_returns_empty_answer_when_no_docs(patched_rag):
     assert result == rag.EMPTY_ANSWER
 
 
-def test_generate_answer_uses_chain_when_docs_exist(patched_rag, sample_documents):
+def test_generate_answer_returns_empty_answer_when_formatted_context_is_blank(
+    patched_rag, sample_documents, monkeypatch
+):
     rag = RAGService()
-    rag.chain = FakeChain("Réponse générée")
 
-    result = rag.generate_answer("question test", sample_documents, session_id="test-session")
+    monkeypatch.setattr(rag, "format_docs", lambda docs: "   ")
+
+    result = rag.generate_answer("question test", sample_documents, session_id="session-1")
+
+    assert result == rag.EMPTY_ANSWER
+
+
+def test_generate_answer_passes_history_to_chain(patched_rag, sample_documents):
+    rag = RAGService()
+    rag.memory_service.history_text = "Utilisateur : Je cherche une exposition"
+    rag.chain = CapturingChain("Réponse générée")
+
+    result = rag.generate_answer("Et les gratuites ?", sample_documents, session_id="session-1")
 
     assert result == "Réponse générée"
+    assert len(rag.chain.calls) == 1
+    payload = rag.chain.calls[0]
+    assert payload["question"] == "Et les gratuites ?"
+    assert "Expo Archi" in payload["context"]
+    assert payload["history"] == "Utilisateur : Je cherche une exposition"
 
 
 def test_generate_answer_returns_empty_answer_when_chain_returns_blank(
     patched_rag, sample_documents
 ):
     rag = RAGService()
-    rag.chain = FakeChain("   ")
+    rag.chain = CapturingChain("   ")
 
     result = rag.generate_answer("question test", sample_documents, session_id="test-session")
 
@@ -576,9 +897,43 @@ def test_ask_empty_question_raises(patched_rag):
         rag.ask("   ")
 
 
+def test_run_pipeline_returns_empty_answer_when_prefilter_returns_no_docs(
+    patched_rag, sample_documents, monkeypatch
+):
+    rag = RAGService(documents=sample_documents)
+    rag.trace_service = FakeTraceService()
+    rag.memory_service = FakeMemoryService()
+    rag.vectorstore = FakeVectorStore()
+
+    monkeypatch.setattr(
+        rag,
+        "_rewrite_question_with_history",
+        lambda question, session_id="default": question,
+    )
+    monkeypatch.setattr(
+        rag,
+        "_prefilter_with_fallback",
+        lambda question: (
+            {"filters": {}, "n_input_docs": 2, "docs": []},
+            None,
+            [],
+            False,
+        ),
+    )
+
+    result = rag._run_pipeline("Je cherche une exposition", session_id="session-1")
+
+    assert result["answer"] == rag.EMPTY_ANSWER
+    assert result["docs"] == []
+    assert result["retrieved_documents"] == []
+    assert result["retrieved_contexts"] == []
+    assert result["fallback_used"] is False
+    assert len(rag.trace_service.payloads) == 1
+
+
 def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
     rag = RAGService(documents=sample_documents, top_k_retrieval=2, top_k_final=1)
-    rag.chain = FakeChain("Réponse pipeline")
+    rag.chain = CapturingChain("Réponse pipeline")
     rag.filter_service = FakeFilterService(docs=sample_documents)
     rag.retrieval_service = FakeRetrievalService(ranked_docs=[sample_documents[0]])
     rag.trace_service = FakeTraceService()
@@ -601,7 +956,6 @@ def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
     assert result["question"] == "Je cherche une exposition"
     assert result["effective_question"] == "Je cherche une exposition"
     assert result["session_id"] == "test-session"
-    assert result["history"] == []
     assert result["answer"] == "Réponse pipeline"
     assert len(result["docs"]) == 1
     assert result["docs"][0].metadata["title"] == "Expo Archi"
@@ -609,6 +963,35 @@ def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
     assert len(result["retrieved_contexts"]) == 1
     assert result["fallback_used"] is False
     assert len(rag.trace_service.payloads) == 1
+
+
+def test_run_pipeline_appends_turn_to_memory(patched_rag, sample_documents, monkeypatch):
+    rag = RAGService(documents=sample_documents, top_k_retrieval=1, top_k_final=1)
+    rag.chain = CapturingChain("Réponse pipeline")
+    rag.filter_service = FakeFilterService(docs=sample_documents)
+    rag.retrieval_service = FakeRetrievalService(ranked_docs=[sample_documents[0]])
+    rag.trace_service = FakeTraceService()
+    rag.memory_service = FakeMemoryService()
+    rag.vectorstore = FakeVectorStore()
+
+    monkeypatch.setattr(
+        rag,
+        "_build_local_vectorstore",
+        lambda docs: FakeVectorStore(results_with_scores=[(sample_documents[0], 0.15)]),
+    )
+    monkeypatch.setattr(
+        rag,
+        "_rewrite_question_with_history",
+        lambda question, session_id="default": question,
+    )
+
+    rag._run_pipeline("Je cherche une exposition", session_id="session-42")
+
+    assert rag.memory_service.messages[0]["session_id"] == "session-42"
+    assert rag.memory_service.messages[0]["role"] == "user"
+    assert rag.memory_service.messages[0]["content"] == "Je cherche une exposition"
+    assert rag.memory_service.messages[1]["role"] == "assistant"
+    assert rag.memory_service.messages[1]["content"] == "Réponse pipeline"
 
 
 def test_ask_returns_ask_response(patched_rag, sample_documents, monkeypatch):
@@ -670,3 +1053,32 @@ def test_ask_debug_returns_debug_payload(patched_rag, sample_documents, monkeypa
     assert response["fallback_used"] is False
     assert "filter_debug" in response
     assert "retrieval_debug" in response
+
+
+def test_ask_debug_includes_fallback_filter_debug_when_present(patched_rag, sample_documents, monkeypatch):
+    rag = RAGService()
+
+    monkeypatch.setattr(
+        rag,
+        "_run_pipeline",
+        lambda question, session_id="default": {
+            "question": question,
+            "effective_question": question,
+            "session_id": session_id,
+            "history": [{"role": "user", "content": "Bonjour"}],
+            "answer": "Réponse debug",
+            "docs": sample_documents[:1],
+            "retrieved_documents": rag.build_retrieved_documents(sample_documents[:1]),
+            "retrieved_contexts": ["Événement 1\nTitre : Expo Archi"],
+            "fallback_used": True,
+            "filter_debug": {"filters": {}, "n_input_docs": 2},
+            "fallback_filter_debug": {"filters": {"fallback": True}, "n_input_docs": 2},
+            "retrieval_debug": {"rows": [{"title": "Expo Archi"}]},
+        },
+    )
+
+    response = rag.ask_debug("architecture", session_id="session-1")
+
+    assert response["fallback_used"] is True
+    assert "fallback_filter_debug" in response
+    assert response["fallback_filter_debug"]["filters"]["fallback"] is True

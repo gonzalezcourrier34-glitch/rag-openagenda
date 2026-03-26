@@ -1,3 +1,17 @@
+"""
+Service de gestion de la mémoire conversationnelle courte.
+
+Cette mémoire est :
+- persistée dans un fichier JSON local
+- vidée au démarrage de l'API
+- limitée à une fenêtre courte par session
+- utilisée uniquement pour maintenir la cohérence
+    d'une conversation en cours
+
+Le service ne sert pas de base de connaissance.
+Il conserve seulement les derniers échanges utiles
+à l'interprétation des questions utilisateur.
+"""
 from __future__ import annotations
 
 import json
@@ -6,20 +20,7 @@ from typing import Any
 
 
 class MemoryService:
-    """
-    Service de gestion de la mémoire conversationnelle courte.
-
-    Cette mémoire est :
-    - persistée dans un fichier JSON local
-    - vidée au démarrage de l'API
-    - limitée à une fenêtre courte par session
-    - utilisée uniquement pour maintenir la cohérence
-      d'une conversation en cours
-
-    Le service ne sert pas de base de connaissance.
-    Il conserve seulement les derniers échanges utiles
-    à l'interprétation des questions utilisateur.
-    """
+    ALLOWED_ROLES = {"user", "assistant"}
 
     def __init__(
         self,
@@ -42,8 +43,8 @@ class MemoryService:
         """
         self.memory_dir = Path(memory_dir)
         self.memory_file = self.memory_dir / memory_file
-        self.max_turns = max_turns
-        self.max_messages = max_turns * 2
+        self.max_turns = max(1, int(max_turns))
+        self.max_messages = self.max_turns * 2
 
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
@@ -60,6 +61,11 @@ class MemoryService:
     def _read_data(self) -> dict[str, list[dict[str, str]]]:
         """
         Lit le contenu mémoire depuis le fichier JSON.
+
+        Returns
+        -------
+        dict[str, list[dict[str, str]]]
+            Dictionnaire des sessions stockées.
         """
         if not self.memory_file.exists():
             return {}
@@ -79,75 +85,173 @@ class MemoryService:
         """
         Écrit le contenu mémoire dans le fichier JSON.
         """
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
         with self.memory_file.open("w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------
+    # Validation / nettoyage
+    # ------------------------------------------------------------------
+
+    def _normalize_session_id(self, session_id: object) -> str:
+        """
+        Normalise un identifiant de session.
+        """
+        return "" if session_id is None else str(session_id).strip()
+
+    def _normalize_role(self, role: object) -> str:
+        """
+        Normalise un rôle conversationnel.
+        """
+        return "" if role is None else str(role).strip().lower()
+
+    def _normalize_content(self, content: object) -> str:
+        """
+        Normalise le contenu textuel d'un message.
+        """
+        return "" if content is None else str(content).strip()
+
+    def _is_valid_message(self, message: object) -> bool:
+        """
+        Vérifie qu'un objet ressemble à un message valide.
+        """
+        if not isinstance(message, dict):
+            return False
+
+        role = self._normalize_role(message.get("role"))
+        content = self._normalize_content(message.get("content"))
+
+        return role in self.ALLOWED_ROLES and bool(content)
+
+    def _clean_history(self, history: object) -> list[dict[str, str]]:
+        """
+        Nettoie une liste brute de messages et conserve uniquement
+        les messages valides.
+        """
+        if not isinstance(history, list):
+            return []
+
+        clean_history: list[dict[str, str]] = []
+
+        for item in history:
+            if not self._is_valid_message(item):
+                continue
+
+            clean_history.append(
+                {
+                    "role": self._normalize_role(item["role"]),
+                    "content": self._normalize_content(item["content"]),
+                }
+            )
+
+        return clean_history[-self.max_messages :]
 
     # ------------------------------------------------------------------
     # Gestion session
     # ------------------------------------------------------------------
 
+    def list_sessions(self) -> list[str]:
+        """
+        Retourne la liste des identifiants de session présents en mémoire.
+        """
+        data = self._read_data()
+        return sorted(str(session_id) for session_id in data.keys())
+
+    def has_session(self, session_id: str) -> bool:
+        """
+        Indique si une session existe et contient au moins un message valide.
+        """
+        session_id = self._normalize_session_id(session_id)
+        if not session_id:
+            return False
+
+        return bool(self.get_history(session_id))
+
     def get_history(self, session_id: str) -> list[dict[str, str]]:
         """
         Retourne l'historique court d'une session.
         """
-        if not session_id or not session_id.strip():
+        session_id = self._normalize_session_id(session_id)
+        if not session_id:
             return []
 
         data = self._read_data()
         history = data.get(session_id, [])
 
-        if not isinstance(history, list):
+        return self._clean_history(history)
+
+    def get_recent_messages(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> list[dict[str, str]]:
+        """
+        Retourne les messages les plus récents d'une session.
+
+        Parameters
+        ----------
+        session_id : str
+            Identifiant de session.
+        max_messages : int | None, default=None
+            Nombre maximal de messages à conserver.
+            Si None, on utilise la fenêtre mémoire du service.
+        """
+        history = self.get_history(session_id)
+        if not history:
             return []
 
-        clean_history: list[dict[str, str]] = []
-        for item in history:
-            if not isinstance(item, dict):
-                continue
+        if max_messages is None:
+            return history
 
-            role = str(item.get("role", "")).strip().lower()
-            content = str(item.get("content", "")).strip()
+        try:
+            max_messages = max(1, int(max_messages))
+        except (TypeError, ValueError):
+            max_messages = self.max_messages
 
-            if role in {"user", "assistant"} and content:
-                clean_history.append(
-                    {
-                        "role": role,
-                        "content": content,
-                    }
-                )
-
-        return clean_history[-self.max_messages :]
+        return history[-max_messages:]
 
     def append_message(self, session_id: str, role: str, content: str) -> None:
         """
         Ajoute un message à la mémoire courte d'une session.
         """
-        session_id = (session_id or "").strip()
-        role = (role or "").strip().lower()
-        content = (content or "").strip()
+        session_id = self._normalize_session_id(session_id)
+        role = self._normalize_role(role)
+        content = self._normalize_content(content)
 
-        if not session_id or role not in {"user", "assistant"} or not content:
+        if not session_id or role not in self.ALLOWED_ROLES or not content:
             return
 
         data = self._read_data()
+        history = self._clean_history(data.get(session_id, []))
 
-        if session_id not in data or not isinstance(data[session_id], list):
-            data[session_id] = []
-
-        data[session_id].append(
+        history.append(
             {
                 "role": role,
                 "content": content,
             }
         )
 
-        data[session_id] = data[session_id][-self.max_messages :]
+        data[session_id] = history[-self.max_messages :]
         self._write_data(data)
+
+    def append_turn(
+        self,
+        session_id: str,
+        user_message: str,
+        assistant_message: str,
+    ) -> None:
+        """
+        Ajoute un tour complet utilisateur + assistant à une session.
+        """
+        self.append_message(session_id, "user", user_message)
+        self.append_message(session_id, "assistant", assistant_message)
 
     def clear_session(self, session_id: str) -> None:
         """
         Supprime l'historique d'une session donnée.
         """
-        session_id = (session_id or "").strip()
+        session_id = self._normalize_session_id(session_id)
         if not session_id:
             return
 
@@ -155,11 +259,40 @@ class MemoryService:
         data.pop(session_id, None)
         self._write_data(data)
 
-    def format_history_for_prompt(self, session_id: str) -> str:
+    def prune_empty_sessions(self) -> None:
+        """
+        Supprime les sessions invalides ou vides du stockage.
+        """
+        data = self._read_data()
+        cleaned_data: dict[str, list[dict[str, str]]] = {}
+
+        for session_id, history in data.items():
+            normalized_session_id = self._normalize_session_id(session_id)
+            if not normalized_session_id:
+                continue
+
+            clean_history = self._clean_history(history)
+            if clean_history:
+                cleaned_data[normalized_session_id] = clean_history
+
+        self._write_data(cleaned_data)
+
+    # ------------------------------------------------------------------
+    # Formatage pour prompts / LLM
+    # ------------------------------------------------------------------
+
+    def format_history_for_prompt(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> str:
         """
         Formate l'historique d'une session pour l'injection dans un prompt.
         """
-        history = self.get_history(session_id)
+        history = self.get_recent_messages(
+            session_id=session_id,
+            max_messages=max_messages,
+        )
         if not history:
             return ""
 
@@ -169,3 +302,62 @@ class MemoryService:
             lines.append(f"{speaker} : {msg['content']}")
 
         return "\n".join(lines)
+
+    def build_prompt_messages(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> list[dict[str, str]]:
+        """
+        Retourne l'historique récent sous forme de messages structurés.
+
+        Cette représentation est utile si le modèle ou la chaîne attend
+        une liste de messages au lieu d'un simple texte concaténé.
+        """
+        history = self.get_recent_messages(
+            session_id=session_id,
+            max_messages=max_messages,
+        )
+
+        return [
+            {
+                "role": msg["role"],
+                "content": msg["content"],
+            }
+            for msg in history
+        ]
+
+    # ------------------------------------------------------------------
+    # Statistiques légères
+    # ------------------------------------------------------------------
+
+    def get_session_size(self, session_id: str) -> int:
+        """
+        Retourne le nombre de messages valides présents dans une session.
+        """
+        return len(self.get_history(session_id))
+
+    def get_stats(self) -> dict[str, int]:
+        """
+        Retourne quelques statistiques simples sur la mémoire.
+        """
+        data = self._read_data()
+        n_sessions = 0
+        n_messages = 0
+
+        for session_id, history in data.items():
+            normalized_session_id = self._normalize_session_id(session_id)
+            if not normalized_session_id:
+                continue
+
+            clean_history = self._clean_history(history)
+            if clean_history:
+                n_sessions += 1
+                n_messages += len(clean_history)
+
+        return {
+            "n_sessions": n_sessions,
+            "n_messages": n_messages,
+            "max_turns": self.max_turns,
+            "max_messages": self.max_messages,
+        }

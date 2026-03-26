@@ -4,51 +4,64 @@ Service principal du pipeline RAG OpenAgenda.
 Ce module orchestre le pipeline complet de recherche et de génération
 de réponses à partir d'événements OpenAgenda indexés dans FAISS.
 
-Responsabilités principales
----------------------------
+## Responsabilités principales
+
 Cette classe pilote les grandes étapes du système :
 
 - chargement ou reconstruction de l'index vectoriel global
 - chargement du corpus documentaire source
-- préfiltrage structuré des documents via FilterService
+- préfiltrage structuré des documents via `FilterService`
 - fallback de préfiltrage lorsque les contraintes sont trop strictes
 - recherche vectorielle sur le sous-corpus retenu
 - injection du score vectoriel dans les métadonnées
-- ranking métier via RetrievalService
+- ranking métier via `RetrievalService`
 - contrôle final de cohérence documentaire
 - formatage du contexte pour le LLM
 - génération de la réponse finale
-- gestion d'une mémoire conversationnelle courte via MemoryService
+- gestion d'une mémoire conversationnelle courte via `MemoryService`
 - reformulation contextuelle des questions selon l'historique récent
 - construction des objets API
 - écriture des traces JSONL
 
-Philosophie du pipeline
------------------------
+## Philosophie du pipeline
+
 Le service ne contient pas la logique métier fine du filtrage lexical
 ou du scoring métier. Ces responsabilités restent déléguées à :
 
-- FilterService
-- RetrievalService
+- `FilterService`
+- `RetrievalService`
 
-RAGService agit comme chef d'orchestre du pipeline. Il décide :
+`RAGService` agit comme chef d'orchestre du pipeline. Il décide :
+
 - quand lancer les différentes briques
 - quand déclencher un fallback
 - quels documents transmettre au ranking
 - quels documents conserver pour la réponse finale
 
-Notes
------
+## Notes
+
 Deux représentations textuelles coexistent volontairement :
 
-- ``search_text`` :
+- `search_text` :
   texte riche destiné à l'embedding et à la recherche vectorielle
-- ``format_doc()`` :
+- `format_doc()` :
   fiche courte et structurée destinée au LLM
 
 Cette séparation permet :
+
 - un retrieval plus riche sémantiquement
 - un contexte plus compact et plus propre pour la génération
+
+## Mémoire conversationnelle
+
+La mémoire courte sert uniquement à :
+
+- maintenir la cohérence conversationnelle entre plusieurs tours
+- reformuler les questions elliptiques ou dépendantes du contexte
+- améliorer la qualité du retrieval en produisant une question autonome
+
+Les faits utilisés dans la réponse finale doivent toujours provenir
+des documents récupérés dans le contexte, jamais de l'historique seul.
 """
 
 from __future__ import annotations
@@ -56,7 +69,7 @@ from __future__ import annotations
 import time
 from datetime import date, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -87,7 +100,8 @@ class RAGService:
     6. ranking métier
     7. contrôle final des documents
     8. génération de la réponse
-    9. traçage complet du pipeline
+    9. mise à jour de la mémoire conversationnelle
+    10. traçage complet du pipeline
 
     Le service ne porte pas la logique métier détaillée du filtrage
     ou du scoring. Il pilote uniquement le flux global.
@@ -157,6 +171,10 @@ class RAGService:
             enabled=trace_enabled,
         )
 
+        # Prompt de réponse finale.
+        # L'historique y est injecté comme aide à la continuité
+        # conversationnelle, mais les faits doivent toujours venir
+        # du contexte documentaire.
         self.prompt = ChatPromptTemplate.from_template(
             """
 Tu es un assistant spécialisé dans les événements culturels.
@@ -196,6 +214,8 @@ Contexte :
 """.strip()
         )
 
+        # Prompt de reformulation pour produire une question autonome
+        # à partir de l'historique récent.
         self.rewrite_prompt = ChatPromptTemplate.from_template(
             """
 Tu reçois :
@@ -228,12 +248,22 @@ Question reformulée :
     def is_index_loaded(self) -> bool:
         """
         Indique si l'index vectoriel global est chargé en mémoire.
+
+        Returns
+        -------
+        bool
+            `True` si l'index est chargé, sinon `False`.
         """
         return self.vectorstore is not None
 
     def set_documents(self, documents: list[Document]) -> None:
         """
         Remplace les documents actuellement stockés dans le service.
+
+        Parameters
+        ----------
+        documents : list[Document]
+            Nouveau corpus documentaire à utiliser.
         """
         self.documents = documents
 
@@ -261,6 +291,11 @@ Question reformulée :
         - si l'index est déjà chargé en mémoire, rien à faire
         - si un index existe sur disque, il est chargé
         - sinon, il est reconstruit à partir des documents disponibles
+
+        Raises
+        ------
+        ValueError
+            Si aucun index et aucun document ne sont disponibles.
         """
         if self.vectorstore is not None:
             self._ensure_documents_loaded()
@@ -287,6 +322,16 @@ Question reformulée :
 
         L'index vectoriel travaille de préférence sur `search_text`,
         plus riche que le contenu court destiné au LLM.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents source.
+
+        Returns
+        -------
+        list[Document]
+            Documents transformés pour l'indexation vectorielle.
         """
         docs_for_index: list[Document] = []
 
@@ -303,9 +348,31 @@ Question reformulée :
 
         return docs_for_index
 
-    def _execute_with_retry(self, func, max_retries: int = 5):
+    def _execute_with_retry(
+        self,
+        func: Callable[[], Any],
+        max_retries: int = 5,
+    ) -> Any:
         """
         Exécute une fonction avec retry simple en cas d'erreur 429.
+
+        Parameters
+        ----------
+        func : Callable[[], Any]
+            Fonction à exécuter.
+        max_retries : int, default=5
+            Nombre maximal de tentatives.
+
+        Returns
+        -------
+        Any
+            Résultat de la fonction exécutée.
+
+        Raises
+        ------
+        Exception
+            Relance l'exception si le retry échoue ou si l'erreur
+            n'est pas un cas de limitation 429.
         """
         for attempt in range(max_retries):
             try:
@@ -321,6 +388,16 @@ Question reformulée :
     def build_index(self) -> int:
         """
         Construit l'index FAISS global à partir du corpus documentaire.
+
+        Returns
+        -------
+        int
+            Nombre de documents indexés.
+
+        Raises
+        ------
+        ValueError
+            Si aucun document n'est disponible.
         """
         if not self.documents:
             raise ValueError(
@@ -331,7 +408,7 @@ Question reformulée :
 
         batch_size = 32
         pause_seconds = 0.3
-        vectorstore = None
+        vectorstore: FAISS | None = None
 
         for i in range(0, len(docs_for_index), batch_size):
             batch = docs_for_index[i : i + batch_size]
@@ -360,6 +437,11 @@ Question reformulée :
     def load_index(self) -> None:
         """
         Charge un index FAISS existant depuis le disque.
+
+        Raises
+        ------
+        FileNotFoundError
+            Si le dossier d'index est absent ou vide.
         """
         if not self.index_dir.exists() or not any(self.index_dir.iterdir()):
             raise FileNotFoundError(
@@ -375,6 +457,16 @@ Question reformulée :
     def rebuild_index(self, documents: list[Document]) -> int:
         """
         Reconstruit complètement l'index FAISS global.
+
+        Parameters
+        ----------
+        documents : list[Document]
+            Nouveau corpus documentaire à indexer.
+
+        Returns
+        -------
+        int
+            Nombre de documents indexés.
         """
         self.set_documents(documents)
         return self.build_index()
@@ -383,6 +475,16 @@ Question reformulée :
         """
         Construit un index FAISS local temporaire sur un sous-ensemble
         de documents préfiltrés.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents candidats.
+
+        Returns
+        -------
+        FAISS
+            Index vectoriel local.
         """
         docs_for_index = self._build_docs_for_vector_index(docs)
 
@@ -395,12 +497,91 @@ Question reformulée :
     # Mémoire conversationnelle
     # ------------------------------------------------------------------
 
+    def _get_recent_history_text(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> str:
+        """
+        Retourne l'historique récent de la session sous forme textuelle.
+
+        Cette représentation est utilisée pour :
+        - la reformulation contextuelle de la question
+        - l'injection d'un historique court dans le prompt final
+
+        Parameters
+        ----------
+        session_id : str
+            Identifiant de session.
+        max_messages : int | None, default=None
+            Nombre maximal de messages à conserver.
+
+        Returns
+        -------
+        str
+            Historique récent concaténé et formaté.
+        """
+        return self.memory_service.format_history_for_prompt(
+            session_id=session_id,
+            max_messages=max_messages,
+        ).strip()
+
+    def _get_recent_history_messages(
+        self,
+        session_id: str,
+        max_messages: int | None = None,
+    ) -> list[dict[str, str]]:
+        """
+        Retourne les messages récents de la session sous forme structurée.
+
+        Cette représentation est utile pour :
+        - le debug
+        - le traçage
+        - une éventuelle évolution future vers un prompt chat natif
+
+        Parameters
+        ----------
+        session_id : str
+            Identifiant de session.
+        max_messages : int | None, default=None
+            Nombre maximal de messages à conserver.
+
+        Returns
+        -------
+        list[dict[str, str]]
+            Messages récents structurés.
+        """
+        return self.memory_service.get_recent_messages(
+            session_id=session_id,
+            max_messages=max_messages,
+        )
+
     def _rewrite_question_with_history(self, question: str, session_id: str) -> str:
         """
         Reformule la question avec l'historique court de la session
         afin d'améliorer la cohérence conversationnelle.
+
+        On limite volontairement le nombre de messages injectés afin de :
+        - conserver seulement le contexte récent utile
+        - limiter le coût en tokens
+        - éviter de diluer l'intention immédiate
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur originale.
+        session_id : str
+            Identifiant de session.
+
+        Returns
+        -------
+        str
+            Question reformulée et autonome.
         """
-        history = self.memory_service.format_history_for_prompt(session_id).strip()
+        history = self._get_recent_history_text(
+            session_id=session_id,
+            max_messages=6,
+        )
 
         if not history:
             return question.strip()
@@ -426,6 +607,16 @@ Question reformulée :
         - les traces JSONL
         - les réponses debug
         - la sérialisation des objets date / datetime
+
+        Parameters
+        ----------
+        value : Any
+            Valeur à convertir.
+
+        Returns
+        -------
+        Any
+            Valeur sérialisable en JSON.
         """
         if isinstance(value, (date, datetime)):
             return value.isoformat()
@@ -443,8 +634,18 @@ Question reformulée :
 
     def _sanitize_filter_debug(self, debug_data: dict[str, Any] | None) -> dict[str, Any] | None:
         """
-        Nettoie une structure de debug issue du FilterService pour la rendre
+        Nettoie une structure de debug issue du `FilterService` pour la rendre
         stable et sérialisable.
+
+        Parameters
+        ----------
+        debug_data : dict[str, Any] | None
+            Structure brute de debug.
+
+        Returns
+        -------
+        dict[str, Any] | None
+            Structure normalisée ou `None`.
         """
         if debug_data is None:
             return None
@@ -469,6 +670,16 @@ Question reformulée :
     def _doc_to_trace_row(self, doc: Document) -> dict[str, Any]:
         """
         Convertit un document en structure légère pour le traçage JSONL.
+
+        Parameters
+        ----------
+        doc : Document
+            Document LangChain à convertir.
+
+        Returns
+        -------
+        dict[str, Any]
+            Métadonnées documentaires simplifiées.
         """
         md = doc.metadata or {}
 
@@ -511,6 +722,35 @@ Question reformulée :
 
         La trace permet de rejouer mentalement le pipeline :
         corpus d'entrée → préfiltrage → retrieval → ranking → réponse.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur originale.
+        effective_question : str
+            Question reformulée utilisée pour le retrieval.
+        session_id : str
+            Identifiant de session.
+        history : list[dict[str, str]]
+            Historique conversationnel récent.
+        filter_debug : dict[str, Any]
+            Debug du préfiltrage principal.
+        fallback_filter_debug : dict[str, Any] | None
+            Debug du fallback éventuel.
+        prefiltered_docs : list[Document]
+            Documents retenus après préfiltrage.
+        raw_docs : list[Document]
+            Documents issus de la recherche vectorielle.
+        ranked_docs : list[Document]
+            Documents après ranking métier.
+        final_docs : list[Document]
+            Documents finaux envoyés au LLM.
+        context : str
+            Contexte textuel transmis au modèle.
+        answer : str
+            Réponse finale générée.
+        fallback_used : bool
+            Indique si le fallback de préfiltrage a été utilisé.
         """
         payload = {
             "question": question,
@@ -549,6 +789,16 @@ Question reformulée :
     ) -> list[Document]:
         """
         Injecte le score vectoriel FAISS dans les métadonnées des documents.
+
+        Parameters
+        ----------
+        results : list[tuple[Document, float]]
+            Résultats bruts de similarité.
+
+        Returns
+        -------
+        list[Document]
+            Documents enrichis avec `vector_score`.
         """
         docs: list[Document] = []
 
@@ -567,6 +817,16 @@ Question reformulée :
 
         Ce garde-fou évite d'envoyer au LLM des documents trop pauvres,
         même s'ils ont survécu au ranking.
+
+        Parameters
+        ----------
+        doc : Document
+            Document à valider.
+
+        Returns
+        -------
+        bool
+            `True` si le document paraît suffisamment exploitable.
         """
         md = doc.metadata or {}
 
@@ -588,6 +848,16 @@ Question reformulée :
         Applique un dernier contrôle léger après le ranking métier.
 
         On privilégie les documents réellement exploitables par le LLM.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents classés.
+
+        Returns
+        -------
+        list[Document]
+            Documents finaux retenus.
         """
         if not docs:
             return []
@@ -602,6 +872,13 @@ Question reformulée :
     def _run_vector_retrieval(self, question: str, candidate_docs: list[Document]) -> list[Document]:
         """
         Lance la recherche vectorielle sur un sous-corpus préfiltré.
+
+        Parameters
+        ----------
+        question : str
+            Question de recherche.
+        candidate_docs : list[Document]
+            Documents candidats.
 
         Returns
         -------
@@ -626,6 +903,16 @@ Question reformulée :
     def _build_relaxed_question(self, question: str) -> str:
         """
         Construit une version plus souple de la question pour un fallback.
+
+        Parameters
+        ----------
+        question : str
+            Question initiale.
+
+        Returns
+        -------
+        str
+            Question fallback.
         """
         return question.strip()
 
@@ -641,15 +928,19 @@ Question reformulée :
         2. si aucun document, second essai sans ville par défaut
         3. si aucun document encore, on garde le résultat vide
 
+        Parameters
+        ----------
+        question : str
+            Question utilisée pour le préfiltrage.
+
         Returns
         -------
-        tuple
-            (
-                filter_debug_principal,
-                filter_debug_fallback_ou_none,
-                docs_prefiltres,
-                fallback_used
-            )
+        tuple[dict[str, Any], dict[str, Any] | None, list[Document], bool]
+            Tuple contenant :
+            - le debug du filtrage principal
+            - le debug du fallback éventuel
+            - les documents préfiltrés
+            - un booléen indiquant si le fallback a été utilisé
         """
         filter_debug = self.filter_service.filter_documents_with_debug(
             question=question,
@@ -684,6 +975,23 @@ Question reformulée :
 
         Ce helper expose uniquement les documents retenus après :
         préfiltrage, recherche vectorielle, ranking métier et contrôle final.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        session_id : str, default="default"
+            Identifiant de session conversationnelle.
+
+        Returns
+        -------
+        list[Document]
+            Documents finaux retenus.
+
+        Raises
+        ------
+        ValueError
+            Si la question est vide.
         """
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
@@ -704,6 +1012,18 @@ Question reformulée :
         - factuel
         - lisible
         - centré sur les informations réellement utiles à la réponse
+
+        Parameters
+        ----------
+        doc : Document
+            Document à formater.
+        index : int | None, default=None
+            Index d'affichage du document.
+
+        Returns
+        -------
+        str
+            Document formaté sous forme textuelle.
         """
         md = doc.metadata or {}
 
@@ -733,6 +1053,16 @@ Question reformulée :
     def format_docs(self, docs: list[Document]) -> str:
         """
         Formate les documents retenus en un bloc texte unique pour le LLM.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents à formater.
+
+        Returns
+        -------
+        str
+            Bloc de contexte documentaire.
         """
         if not docs:
             return ""
@@ -747,6 +1077,16 @@ Question reformulée :
         Formate séparément chaque document.
 
         Utile pour le debug, l'évaluation et les inspections fines.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents à formater.
+
+        Returns
+        -------
+        list[str]
+            Liste de documents formatés.
         """
         if not docs:
             return []
@@ -763,6 +1103,16 @@ Question reformulée :
     def _build_retrieved_document(self, doc: Document) -> RetrievedDocument:
         """
         Convertit un document LangChain en objet structuré pour l'API.
+
+        Parameters
+        ----------
+        doc : Document
+            Document source.
+
+        Returns
+        -------
+        RetrievedDocument
+            Schéma structuré pour l'API.
         """
         md = doc.metadata or {}
 
@@ -793,6 +1143,16 @@ Question reformulée :
     ) -> list[RetrievedDocument]:
         """
         Convertit les documents LangChain en objets structurés pour l'API.
+
+        Parameters
+        ----------
+        docs : list[Document]
+            Documents source.
+
+        Returns
+        -------
+        list[RetrievedDocument]
+            Documents convertis.
         """
         return [self._build_retrieved_document(doc) for doc in docs]
 
@@ -800,12 +1160,31 @@ Question reformulée :
     # Génération
     # ------------------------------------------------------------------
 
-    def generate_answer(self, question: str, docs: list[Document], session_id: str) -> str:
+    def generate_answer(
+        self,
+        question: str,
+        docs: list[Document],
+        session_id: str = "default",
+    ) -> str:
         """
         Génère une réponse finale à partir de la question, des documents
         et de l'historique court de session.
 
         Si aucun document n'est disponible, le LLM n'est pas appelé.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur originale.
+        docs : list[Document]
+            Documents retenus pour la réponse.
+        session_id : str, default="default"
+            Identifiant de session conversationnelle.
+
+        Returns
+        -------
+        str
+            Réponse finale générée.
         """
         if not docs:
             return self.EMPTY_ANSWER
@@ -814,7 +1193,10 @@ Question reformulée :
         if not context:
             return self.EMPTY_ANSWER
 
-        history = self.memory_service.format_history_for_prompt(session_id).strip()
+        history = self._get_recent_history_text(
+            session_id=session_id,
+            max_messages=6,
+        )
 
         answer = self.chain.invoke(
             {
@@ -848,12 +1230,31 @@ Question reformulée :
         9. génération de réponse
         10. mise à jour de la mémoire conversationnelle
         11. traçage complet
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur originale.
+        session_id : str, default="default"
+            Identifiant de session conversationnelle.
+
+        Returns
+        -------
+        dict[str, Any]
+            Résultat complet du pipeline pour usage API et debug.
+
+        Raises
+        ------
+        ValueError
+            Si la question est vide.
         """
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
 
         self.ensure_index_ready()
 
+        # Reformulation contextuelle pour produire une question autonome
+        # et plus exploitable par le retrieval.
         effective_question = self._rewrite_question_with_history(question, session_id)
 
         filter_debug, fallback_filter_debug, prefiltered_docs, fallback_used = (
@@ -890,10 +1291,18 @@ Question reformulée :
             top_k=len(raw_docs) if raw_docs else self.top_k_final,
         )
 
-        self.memory_service.append_message(session_id, "user", question)
-        self.memory_service.append_message(session_id, "assistant", answer)
+        # On enregistre le tour de conversation complet pour la session.
+        self.memory_service.append_turn(
+            session_id=session_id,
+            user_message=question,
+            assistant_message=answer,
+        )
 
-        history = self.memory_service.get_history(session_id)
+        # On renvoie l'historique réellement utile, limité à la fenêtre récente.
+        history = self._get_recent_history_messages(
+            session_id=session_id,
+            max_messages=6,
+        )
 
         self._trace_pipeline(
             question=question,
@@ -929,6 +1338,18 @@ Question reformulée :
     def ask(self, question: str, session_id: str = "default") -> AskResponse:
         """
         Exécute le pipeline RAG complet pour une question utilisateur.
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        session_id : str, default="default"
+            Identifiant de session conversationnelle.
+
+        Returns
+        -------
+        AskResponse
+            Réponse standard de l'API.
         """
         result = self._run_pipeline(question, session_id=session_id)
 
@@ -952,6 +1373,18 @@ Question reformulée :
         - les étapes du filtrage
         - le fallback éventuel
         - les scores métier du ranking
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        session_id : str, default="default"
+            Identifiant de session conversationnelle.
+
+        Returns
+        -------
+        dict[str, Any]
+            Payload complet de debug sérialisable.
         """
         result = self._run_pipeline(question, session_id=session_id)
 
