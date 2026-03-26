@@ -15,12 +15,16 @@ from app.security import require_api_key
 app.dependency_overrides[require_api_key] = lambda: "test-key"
 
 
-# -------------------------------------------------------------------------
-# Helpers
-# -------------------------------------------------------------------------
+class FakeMemoryService:
+    def reset_memory(self) -> None:
+        pass
+
 
 class FakeRAGAsk:
-    def ask(self, question):
+    def __init__(self):
+        self.memory_service = FakeMemoryService()
+
+    def ask(self, question, session_id="default"):
         return {
             "question": question,
             "answer": "Réponse test",
@@ -41,13 +45,20 @@ class FakeRAGAsk:
                     "score": None,
                 }
             ],
+            "session_id": session_id,
         }
 
 
 class FakeRAGAskDebug:
-    def ask_debug(self, question):
+    def __init__(self):
+        self.memory_service = FakeMemoryService()
+
+    def ask_debug(self, question, session_id="default"):
         return {
             "question": question,
+            "effective_question": question,
+            "session_id": session_id,
+            "history": [],
             "answer": "Réponse debug",
             "n_docs": 1,
             "documents": [
@@ -69,17 +80,20 @@ class FakeRAGAskDebug:
             "retrieved_contexts": ["Contenu test"],
             "fallback_used": False,
             "filter_debug": {"filters": {}, "n_input_docs": 1},
-            "retrieval_debug": [],
+            "retrieval_debug": {},
         }
 
-
 class FakeRAGHealth:
+    def __init__(self):
+        self.memory_service = FakeMemoryService()
+
     def is_index_loaded(self):
         return True
 
 
 class FakeRAGRebuild:
     def __init__(self):
+        self.memory_service = FakeMemoryService()
         self.zone = None
         self.scope = None
         self.documents = None
@@ -88,10 +102,6 @@ class FakeRAGRebuild:
         self.documents = documents
         return 2
 
-
-# -------------------------------------------------------------------------
-# Helpers internes
-# -------------------------------------------------------------------------
 
 def test_raise_http_from_exception_file_not_found():
     with pytest.raises(HTTPException) as exc_info:
@@ -129,13 +139,10 @@ def test_raise_http_from_exception_unexpected():
     assert exc_info.value.detail == "Erreur interne du serveur."
 
 
-# -------------------------------------------------------------------------
-# Initialisation
-# -------------------------------------------------------------------------
-
 def test_initialize_rag_service_returns_when_already_loaded(monkeypatch):
     class FakeRAG:
         def __init__(self):
+            self.memory_service = FakeMemoryService()
             self.index_dir = Path("unused")
 
         def is_index_loaded(self):
@@ -153,6 +160,7 @@ def test_initialize_rag_service_loads_existing_index(monkeypatch, tmp_path):
 
     class FakeRAG:
         def __init__(self):
+            self.memory_service = FakeMemoryService()
             self.index_dir = index_dir
             self.documents = None
             self.zone = None
@@ -184,6 +192,7 @@ def test_initialize_rag_service_loads_existing_index(monkeypatch, tmp_path):
 def test_initialize_rag_service_warns_when_no_documents(monkeypatch, tmp_path):
     class FakeRAG:
         def __init__(self):
+            self.memory_service = FakeMemoryService()
             self.index_dir = tmp_path / "missing_index"
             self.zone = None
             self.scope = None
@@ -200,6 +209,7 @@ def test_initialize_rag_service_warns_when_no_documents(monkeypatch, tmp_path):
 def test_initialize_rag_service_builds_index_when_documents_exist(monkeypatch, tmp_path):
     class FakeRAG:
         def __init__(self):
+            self.memory_service = FakeMemoryService()
             self.index_dir = tmp_path / "missing_index"
             self.zone = None
             self.scope = None
@@ -224,10 +234,6 @@ def test_initialize_rag_service_builds_index_when_documents_exist(monkeypatch, t
     assert fake_rag.documents == ["doc1", "doc2", "doc3"]
 
 
-# -------------------------------------------------------------------------
-# Routes simples
-# -------------------------------------------------------------------------
-
 def test_root_redirects_to_docs():
     client = TestClient(app)
 
@@ -249,33 +255,33 @@ def test_health_ok(monkeypatch):
     assert data["index_loaded"] is True
 
 
-# -------------------------------------------------------------------------
-# /ask
-# -------------------------------------------------------------------------
-
 def test_ask_success(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGAsk())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post("/ask", json={"question": "test", "session_id": "test-session"})
 
     assert response.status_code == 200
     data = response.json()
     assert data["question"] == "test"
     assert data["answer"] == "Réponse test"
     assert data["n_docs"] == 1
+    assert data["session_id"] == "test-session"
     assert data["documents"][0]["title"] == "Expo test"
 
 
 def test_ask_file_not_found(monkeypatch):
     class FakeRAG:
-        def ask(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask(self, question, session_id="default"):
             raise FileNotFoundError("index absent")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post("/ask", json={"question": "test", "session_id": "test-session"})
 
     assert response.status_code == 503
     assert "index absent" in response.json()["detail"]
@@ -283,13 +289,16 @@ def test_ask_file_not_found(monkeypatch):
 
 def test_ask_value_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask(self, question, session_id="default"):
             raise ValueError("question invalide")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post("/ask", json={"question": "test", "session_id": "test-session"})
 
     assert response.status_code == 400
     assert "question invalide" in response.json()["detail"]
@@ -297,31 +306,36 @@ def test_ask_value_error(monkeypatch):
 
 def test_ask_unexpected_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask(self, question, session_id="default"):
             raise RuntimeError("boom")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post("/ask", json={"question": "test", "session_id": "test-session"})
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Erreur interne du serveur."
 
 
-# -------------------------------------------------------------------------
-# /ask/debug
-# -------------------------------------------------------------------------
-
 def test_ask_debug_success(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGAskDebug())
     client = TestClient(app)
 
-    response = client.post("/ask/debug", json={"question": "test debug"})
+    response = client.post(
+        "/ask/debug",
+        json={"question": "test debug", "session_id": "debug-session"},
+    )
 
     assert response.status_code == 200
     data = response.json()
     assert data["question"] == "test debug"
+    assert data["effective_question"] == "test debug"
+    assert data["session_id"] == "debug-session"
+    assert data["history"] == []
     assert data["answer"] == "Réponse debug"
     assert data["n_docs"] == 1
     assert data["retrieved_contexts"] == ["Contenu test"]
@@ -330,13 +344,19 @@ def test_ask_debug_success(monkeypatch):
 
 def test_ask_debug_file_not_found(monkeypatch):
     class FakeRAG:
-        def ask_debug(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask_debug(self, question, session_id="default"):
             raise FileNotFoundError("index absent")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask/debug", json={"question": "test debug"})
+    response = client.post(
+        "/ask/debug",
+        json={"question": "test debug", "session_id": "debug-session"},
+    )
 
     assert response.status_code == 503
     assert "index absent" in response.json()["detail"]
@@ -344,13 +364,19 @@ def test_ask_debug_file_not_found(monkeypatch):
 
 def test_ask_debug_value_error(monkeypatch):
     class FakeRAG:
-        def ask_debug(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask_debug(self, question, session_id="default"):
             raise ValueError("question invalide")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask/debug", json={"question": "test debug"})
+    response = client.post(
+        "/ask/debug",
+        json={"question": "test debug", "session_id": "debug-session"},
+    )
 
     assert response.status_code == 400
     assert "question invalide" in response.json()["detail"]
@@ -358,13 +384,19 @@ def test_ask_debug_value_error(monkeypatch):
 
 def test_ask_debug_unexpected_error(monkeypatch):
     class FakeRAG:
-        def ask_debug(self, question):
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+
+        def ask_debug(self, question, session_id="default"):
             raise RuntimeError("boom")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask/debug", json={"question": "test debug"})
+    response = client.post(
+        "/ask/debug",
+        json={"question": "test debug", "session_id": "debug-session"},
+    )
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Erreur interne du serveur."
@@ -373,14 +405,10 @@ def test_ask_debug_unexpected_error(monkeypatch):
 def test_ask_debug_empty_question_returns_422():
     client = TestClient(app)
 
-    response = client.post("/ask/debug", json={"question": ""})
+    response = client.post("/ask/debug", json={"question": "", "session_id": "debug-session"})
 
     assert response.status_code == 422
 
-
-# -------------------------------------------------------------------------
-# /rebuild
-# -------------------------------------------------------------------------
 
 def test_rebuild_success(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGRebuild())

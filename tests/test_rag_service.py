@@ -108,6 +108,29 @@ class FakeFAISSFactory:
         return self.loaded_store
 
 
+class FakeMemoryService:
+    def __init__(self):
+        self.messages = []
+
+    def format_history_for_prompt(self, session_id: str) -> str:
+        return ""
+
+    def append_message(self, session_id: str, role: str, content: str) -> None:
+        self.messages.append(
+            {
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+            }
+        )
+
+    def get_history(self, session_id: str):
+        return []
+
+    def reset_memory(self) -> None:
+        pass
+
+
 # -------------------------------------------------------------------------
 # Fixtures
 # -------------------------------------------------------------------------
@@ -173,6 +196,7 @@ def patched_rag(monkeypatch):
     monkeypatch.setattr("app.rag_service.FilterService", FakeFilterService)
     monkeypatch.setattr("app.rag_service.RetrievalService", FakeRetrievalService)
     monkeypatch.setattr("app.rag_service.TraceService", FakeTraceService)
+    monkeypatch.setattr("app.rag_service.MemoryService", FakeMemoryService)
 
     return fake_faiss
 
@@ -375,7 +399,11 @@ def test_run_vector_retrieval_returns_scored_docs(patched_rag, sample_documents,
 
 def test_retrieve_returns_docs_from_pipeline(patched_rag, sample_documents, monkeypatch):
     rag = RAGService()
-    monkeypatch.setattr(rag, "_run_pipeline", lambda question: {"docs": sample_documents[:1]})
+    monkeypatch.setattr(
+        rag,
+        "_run_pipeline",
+        lambda question, session_id="default": {"docs": sample_documents[:1]},
+    )
 
     docs = rag.retrieve("architecture")
 
@@ -512,7 +540,7 @@ def test_build_retrieved_documents_returns_list(patched_rag, sample_documents):
 def test_generate_answer_returns_empty_answer_when_no_docs(patched_rag):
     rag = RAGService()
 
-    result = rag.generate_answer("question test", [])
+    result = rag.generate_answer("question test", [], session_id="test-session")
 
     assert result == rag.EMPTY_ANSWER
 
@@ -521,7 +549,7 @@ def test_generate_answer_uses_chain_when_docs_exist(patched_rag, sample_document
     rag = RAGService()
     rag.chain = FakeChain("Réponse générée")
 
-    result = rag.generate_answer("question test", sample_documents)
+    result = rag.generate_answer("question test", sample_documents, session_id="test-session")
 
     assert result == "Réponse générée"
 
@@ -532,7 +560,7 @@ def test_generate_answer_returns_empty_answer_when_chain_returns_blank(
     rag = RAGService()
     rag.chain = FakeChain("   ")
 
-    result = rag.generate_answer("question test", sample_documents)
+    result = rag.generate_answer("question test", sample_documents, session_id="test-session")
 
     assert result == rag.EMPTY_ANSWER
 
@@ -554,6 +582,7 @@ def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
     rag.filter_service = FakeFilterService(docs=sample_documents)
     rag.retrieval_service = FakeRetrievalService(ranked_docs=[sample_documents[0]])
     rag.trace_service = FakeTraceService()
+    rag.memory_service = FakeMemoryService()
     rag.vectorstore = FakeVectorStore()
 
     monkeypatch.setattr(
@@ -561,10 +590,18 @@ def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
         "_build_local_vectorstore",
         lambda docs: FakeVectorStore(results_with_scores=[(sample_documents[0], 0.15)]),
     )
+    monkeypatch.setattr(
+        rag,
+        "_rewrite_question_with_history",
+        lambda question, session_id="default": question,
+    )
 
-    result = rag._run_pipeline("Je cherche une exposition")
+    result = rag._run_pipeline("Je cherche une exposition", session_id="test-session")
 
     assert result["question"] == "Je cherche une exposition"
+    assert result["effective_question"] == "Je cherche une exposition"
+    assert result["session_id"] == "test-session"
+    assert result["history"] == []
     assert result["answer"] == "Réponse pipeline"
     assert len(result["docs"]) == 1
     assert result["docs"][0].metadata["title"] == "Expo Archi"
@@ -580,19 +617,21 @@ def test_ask_returns_ask_response(patched_rag, sample_documents, monkeypatch):
     monkeypatch.setattr(
         rag,
         "_run_pipeline",
-        lambda question: {
+        lambda question, session_id="default": {
             "question": question,
             "answer": "Réponse finale",
             "docs": sample_documents[:1],
             "retrieved_documents": rag.build_retrieved_documents(sample_documents[:1]),
+            "session_id": session_id,
         },
     )
 
-    response = rag.ask("architecture")
+    response = rag.ask("architecture", session_id="test-session")
 
     assert response.question == "architecture"
     assert response.answer == "Réponse finale"
     assert response.n_docs == 1
+    assert response.session_id == "test-session"
     assert response.documents[0].title == "Expo Archi"
 
 
@@ -602,8 +641,11 @@ def test_ask_debug_returns_debug_payload(patched_rag, sample_documents, monkeypa
     monkeypatch.setattr(
         rag,
         "_run_pipeline",
-        lambda question: {
+        lambda question, session_id="default": {
             "question": question,
+            "effective_question": question,
+            "session_id": session_id,
+            "history": [],
             "answer": "Réponse debug",
             "docs": sample_documents[:1],
             "retrieved_documents": rag.build_retrieved_documents(sample_documents[:1]),
@@ -611,13 +653,16 @@ def test_ask_debug_returns_debug_payload(patched_rag, sample_documents, monkeypa
             "fallback_used": False,
             "filter_debug": {"filters": {}, "n_input_docs": 2},
             "fallback_filter_debug": None,
-            "retrieval_debug": [{"title": "Expo Archi", "final_score": 0.8}],
+            "retrieval_debug": {"rows": [{"title": "Expo Archi", "final_score": 0.8}]},
         },
     )
 
-    response = rag.ask_debug("architecture")
+    response = rag.ask_debug("architecture", session_id="test-session")
 
     assert response["question"] == "architecture"
+    assert response["effective_question"] == "architecture"
+    assert response["session_id"] == "test-session"
+    assert response["history"] == []
     assert response["answer"] == "Réponse debug"
     assert response["n_docs"] == 1
     assert response["documents"][0]["title"] == "Expo Archi"

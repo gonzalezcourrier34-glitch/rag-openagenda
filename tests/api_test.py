@@ -4,8 +4,16 @@ from app.main import app
 from app.security import require_api_key
 
 
+class FakeMemoryService:
+    def reset_memory(self) -> None:
+        pass
+
+
 class FakeRAGService:
-    def ask(self, question: str, k: int | None = None):
+    def __init__(self):
+        self.memory_service = FakeMemoryService()
+
+    def ask(self, question: str, session_id: str = "default"):
         from app.schemas import AskResponse, RetrievedDocument
 
         return AskResponse(
@@ -28,11 +36,15 @@ class FakeRAGService:
                     score=None,
                 )
             ],
+            session_id=session_id,
         )
 
-    def ask_debug(self, question: str):
+    def ask_debug(self, question: str, session_id: str = "default"):
         return {
             "question": question,
+            "effective_question": question,
+            "session_id": session_id,
+            "history": [],
             "answer": "Réponse debug",
             "n_docs": 1,
             "documents": [
@@ -54,7 +66,7 @@ class FakeRAGService:
             "retrieved_contexts": ["Contenu test"],
             "fallback_used": False,
             "filter_debug": {"filters": {}, "n_input_docs": 1},
-            "retrieval_debug": [],
+            "retrieval_debug": {},
         }
 
     def rebuild_index(self, documents):
@@ -66,6 +78,9 @@ class FakeRAGService:
 
 
 class FakeRAGServiceNoIndex:
+    def __init__(self):
+        self.memory_service = FakeMemoryService()
+
     def is_index_loaded(self):
         return False
 
@@ -114,7 +129,7 @@ def test_ask(monkeypatch):
 
     response = client.post(
         "/ask",
-        json={"question": question},
+        json={"question": question, "session_id": "test-session"},
     )
 
     assert response.status_code == 200
@@ -122,6 +137,7 @@ def test_ask(monkeypatch):
     assert data["question"] == question
     assert data["answer"] == "Voici une exposition d'architecture à Montpellier."
     assert data["n_docs"] == 1
+    assert data["session_id"] == "test-session"
     assert len(data["documents"]) == 1
     assert data["documents"][0]["title"] == "Expo Archi"
     assert data["documents"][0]["city"] == "Montpellier"
@@ -129,13 +145,16 @@ def test_ask(monkeypatch):
 
 def test_ask_value_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question: str, k: int | None = None):
+        def ask(self, question: str, session_id: str = "default"):
             raise ValueError("question invalide")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "bad question"})
+    response = client.post(
+        "/ask",
+        json={"question": "bad question", "session_id": "test-session"},
+    )
 
     assert response.status_code == 400
     assert "question invalide" in response.json()["detail"]
@@ -143,13 +162,16 @@ def test_ask_value_error(monkeypatch):
 
 def test_ask_file_not_found(monkeypatch):
     class FakeRAG:
-        def ask(self, question: str, k: int | None = None):
+        def ask(self, question: str, session_id: str = "default"):
             raise FileNotFoundError("index absent")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post(
+        "/ask",
+        json={"question": "test", "session_id": "test-session"},
+    )
 
     assert response.status_code == 503
     assert "index absent" in response.json()["detail"]
@@ -157,13 +179,16 @@ def test_ask_file_not_found(monkeypatch):
 
 def test_ask_unexpected_error(monkeypatch):
     class FakeRAG:
-        def ask(self, question: str, k: int | None = None):
+        def ask(self, question: str, session_id: str = "default"):
             raise Exception("boom")
 
     monkeypatch.setattr("app.main.rag_service", FakeRAG())
     client = TestClient(app)
 
-    response = client.post("/ask", json={"question": "test"})
+    response = client.post(
+        "/ask",
+        json={"question": "test", "session_id": "test-session"},
+    )
 
     assert response.status_code == 500
     assert response.json()["detail"] == "Erreur interne du serveur."
@@ -175,12 +200,15 @@ def test_ask_debug(monkeypatch):
 
     response = client.post(
         "/ask/debug",
-        json={"question": "debug exposition"},
+        json={"question": "debug exposition", "session_id": "debug-session"},
     )
 
     assert response.status_code == 200
     data = response.json()
     assert data["question"] == "debug exposition"
+    assert data["effective_question"] == "debug exposition"
+    assert data["session_id"] == "debug-session"
+    assert data["history"] == []
     assert data["answer"] == "Réponse debug"
     assert data["n_docs"] == 1
     assert data["retrieved_contexts"] == ["Contenu test"]

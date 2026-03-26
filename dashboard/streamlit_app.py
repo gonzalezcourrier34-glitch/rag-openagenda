@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import html
 import sys
+import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -265,7 +266,7 @@ def call_rebuild(zone: str, scope: str) -> requests.Response:
     )
 
 
-def call_ask(question: str) -> requests.Response:
+def call_ask(question: str, session_id: str) -> requests.Response:
     """
     Envoie une question utilisateur à l'endpoint `/ask`.
 
@@ -273,6 +274,8 @@ def call_ask(question: str) -> requests.Response:
     ----------
     question : str
         Question formulée en langage naturel par l'utilisateur.
+    session_id : str
+        Identifiant de session conversationnelle transmis à l'API.
 
     Returns
     -------
@@ -281,7 +284,10 @@ def call_ask(question: str) -> requests.Response:
     """
     return requests.post(
         f"{API_URL}/ask",
-        json={"question": question},
+        json={
+            "question": question,
+            "session_id": session_id,
+        },
         headers=get_headers(),
         timeout=90,
     )
@@ -442,6 +448,9 @@ if "history" not in st.session_state:
 if "health_data" not in st.session_state:
     st.session_state.health_data = None
 
+if "session_id" not in st.session_state:
+    st.session_state.session_id = str(uuid.uuid4())
+
 
 # -------------------------------------------------------------------------
 # Vérification minimale de configuration
@@ -465,6 +474,7 @@ st.caption("Trouvez des événements culturels via langage naturel")
 
 st.sidebar.header("Contrôles API")
 st.sidebar.write(f"**URL API :** `{API_URL}`")
+st.sidebar.write(f"**Session ID :** `{st.session_state.session_id}`")
 
 if st.sidebar.button("Vérifier /health", use_container_width=True):
     try:
@@ -506,17 +516,25 @@ with tab_chat:
     with col_clear:
         if st.button("Vider l'historique", use_container_width=True):
             st.session_state.history = []
-            st.success("Historique vidé.")
+            st.session_state.session_id = str(uuid.uuid4())
+            st.success("Historique vidé et nouvelle session créée.")
 
     if search_clicked:
         if question.strip():
             try:
                 with st.spinner("Recherche..."):
-                    response = call_ask(question.strip())
+                    response = call_ask(
+                        question=question.strip(),
+                        session_id=st.session_state.session_id,
+                    )
 
                 if response.ok:
                     data = response.json()
                     st.session_state.history.insert(0, data)
+
+                    returned_session_id = data.get("session_id")
+                    if returned_session_id:
+                        st.session_state.session_id = returned_session_id
 
                     render_answer(data.get("answer", ""))
                     render_metrics(

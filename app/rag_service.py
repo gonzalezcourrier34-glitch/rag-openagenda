@@ -18,6 +18,8 @@ Cette classe pilote les grandes étapes du système :
 - contrôle final de cohérence documentaire
 - formatage du contexte pour le LLM
 - génération de la réponse finale
+- gestion d'une mémoire conversationnelle courte via MemoryService
+- reformulation contextuelle des questions selon l'historique récent
 - construction des objets API
 - écriture des traces JSONL
 
@@ -51,10 +53,10 @@ Cette séparation permet :
 
 from __future__ import annotations
 
+import time
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-import time
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
@@ -65,6 +67,7 @@ from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
 from app.config import DEFAULT_SCOPE, DEFAULT_ZONE, FAISS_INDEX_DIR
 from app.document_service import load_documents
 from app.filter_service import FilterService
+from app.memory_service import MemoryService
 from app.retrieval_service import RetrievalService
 from app.schemas import AskResponse, RetrievedDocument
 from app.trace_service import TraceService
@@ -79,11 +82,12 @@ class RAGService:
     1. disponibilité des documents et de l'index
     2. préfiltrage structuré
     3. fallback éventuel si le filtrage est trop dur
-    4. recherche vectorielle locale
-    5. ranking métier
-    6. contrôle final des documents
-    7. génération de la réponse
-    8. traçage complet du pipeline
+    4. reformulation contextuelle via mémoire courte
+    5. recherche vectorielle locale
+    6. ranking métier
+    7. contrôle final des documents
+    8. génération de la réponse
+    9. traçage complet du pipeline
 
     Le service ne porte pas la logique métier détaillée du filtrage
     ou du scoring. Il pilote uniquement le flux global.
@@ -147,6 +151,7 @@ class RAGService:
 
         self.filter_service = FilterService()
         self.retrieval_service = RetrievalService()
+        self.memory_service = MemoryService()
         self.trace_service = TraceService(
             trace_file=trace_file,
             enabled=trace_enabled,
@@ -158,6 +163,11 @@ Tu es un assistant spécialisé dans les événements culturels.
 
 Tu réponds uniquement à partir des documents fournis dans le contexte.
 Tu ne dois jamais inventer d'événement.
+
+L'historique récent sert uniquement à comprendre la continuité
+de la conversation.
+Les faits utilisés dans la réponse doivent toujours provenir
+du contexte documentaire.
 
 Consignes de réponse :
 - Si aucun document pertinent n'est disponible, réponds exactement :
@@ -175,6 +185,9 @@ Tu ne dois pas ajouter d'introduction, de conclusion, ni de commentaire.
 Tu dois rester strictement fidèle au contexte.
 Tu ne dois jamais mentionner d'événement absent du contexte.
 
+Historique récent :
+{history}
+
 Question :
 {question}
 
@@ -183,7 +196,30 @@ Contexte :
 """.strip()
         )
 
+        self.rewrite_prompt = ChatPromptTemplate.from_template(
+            """
+Tu reçois :
+- un historique récent de conversation
+- une nouvelle question utilisateur
+
+Ta mission :
+- reformuler la nouvelle question pour qu'elle soit autonome
+- conserver strictement l'intention de l'utilisateur
+- ne rien inventer
+- si la question est déjà autonome, retourne-la telle quelle ou presque
+
+Historique :
+{history}
+
+Nouvelle question :
+{question}
+
+Question reformulée :
+""".strip()
+        )
+
         self.chain = self.prompt | self.llm | StrOutputParser()
+        self.rewrite_chain = self.rewrite_prompt | self.llm | StrOutputParser()
 
     # ------------------------------------------------------------------
     # Gestion de l'index et des documents
@@ -282,7 +318,6 @@ Contexte :
                     continue
                 raise
 
-
     def build_index(self) -> int:
         """
         Construit l'index FAISS global à partir du corpus documentaire.
@@ -355,6 +390,29 @@ Contexte :
             documents=docs_for_index,
             embedding=self.embeddings,
         )
+
+    # ------------------------------------------------------------------
+    # Mémoire conversationnelle
+    # ------------------------------------------------------------------
+
+    def _rewrite_question_with_history(self, question: str, session_id: str) -> str:
+        """
+        Reformule la question avec l'historique court de la session
+        afin d'améliorer la cohérence conversationnelle.
+        """
+        history = self.memory_service.format_history_for_prompt(session_id).strip()
+
+        if not history:
+            return question.strip()
+
+        rewritten = self.rewrite_chain.invoke(
+            {
+                "history": history,
+                "question": question,
+            }
+        ).strip()
+
+        return rewritten or question.strip()
 
     # ------------------------------------------------------------------
     # Sérialisation / debug
@@ -435,6 +493,9 @@ Contexte :
         self,
         *,
         question: str,
+        effective_question: str,
+        session_id: str,
+        history: list[dict[str, str]],
         filter_debug: dict[str, Any],
         fallback_filter_debug: dict[str, Any] | None,
         prefiltered_docs: list[Document],
@@ -453,6 +514,9 @@ Contexte :
         """
         payload = {
             "question": question,
+            "effective_question": effective_question,
+            "session_id": session_id,
+            "history": history,
             "zone": self.zone,
             "scope": self.scope,
             "top_k_retrieval": self.top_k_retrieval,
@@ -614,7 +678,7 @@ Contexte :
     # API retrieval
     # ------------------------------------------------------------------
 
-    def retrieve(self, question: str) -> list[Document]:
+    def retrieve(self, question: str, session_id: str = "default") -> list[Document]:
         """
         Récupère les documents finaux les plus pertinents pour une question.
 
@@ -624,7 +688,7 @@ Contexte :
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
 
-        result = self._run_pipeline(question)
+        result = self._run_pipeline(question, session_id=session_id)
         return result["docs"]
 
     # ------------------------------------------------------------------
@@ -736,9 +800,10 @@ Contexte :
     # Génération
     # ------------------------------------------------------------------
 
-    def generate_answer(self, question: str, docs: list[Document]) -> str:
+    def generate_answer(self, question: str, docs: list[Document], session_id: str) -> str:
         """
-        Génère une réponse finale à partir de la question et des documents.
+        Génère une réponse finale à partir de la question, des documents
+        et de l'historique court de session.
 
         Si aucun document n'est disponible, le LLM n'est pas appelé.
         """
@@ -749,7 +814,15 @@ Contexte :
         if not context:
             return self.EMPTY_ANSWER
 
-        answer = self.chain.invoke({"question": question, "context": context})
+        history = self.memory_service.format_history_for_prompt(session_id).strip()
+
+        answer = self.chain.invoke(
+            {
+                "question": question,
+                "context": context,
+                "history": history,
+            }
+        )
         answer = answer.strip()
 
         return answer or self.EMPTY_ANSWER
@@ -758,7 +831,7 @@ Contexte :
     # Pipeline complet
     # ------------------------------------------------------------------
 
-    def _run_pipeline(self, question: str) -> dict[str, Any]:
+    def _run_pipeline(self, question: str, session_id: str = "default") -> dict[str, Any]:
         """
         Exécute le pipeline RAG complet et retourne toutes les données utiles.
 
@@ -766,21 +839,25 @@ Contexte :
         ------
         1. validation de la question
         2. disponibilité du corpus et de l'index
-        3. préfiltrage structuré
-        4. fallback éventuel du préfiltrage
-        5. recherche vectorielle locale
-        6. ranking métier
-        7. contrôle final documentaire
-        8. génération de réponse
-        9. traçage complet
+        3. reformulation contextuelle éventuelle via mémoire courte
+        4. préfiltrage structuré
+        5. fallback éventuel du préfiltrage
+        6. recherche vectorielle locale
+        7. ranking métier
+        8. contrôle final documentaire
+        9. génération de réponse
+        10. mise à jour de la mémoire conversationnelle
+        11. traçage complet
         """
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
 
         self.ensure_index_ready()
 
+        effective_question = self._rewrite_question_with_history(question, session_id)
+
         filter_debug, fallback_filter_debug, prefiltered_docs, fallback_used = (
-            self._prefilter_with_fallback(question)
+            self._prefilter_with_fallback(effective_question)
         )
 
         raw_docs: list[Document] = []
@@ -789,13 +866,13 @@ Contexte :
 
         if prefiltered_docs:
             raw_docs = self._run_vector_retrieval(
-                question=question,
+                question=effective_question,
                 candidate_docs=prefiltered_docs,
             )
 
             if raw_docs:
                 ranked_docs = self.retrieval_service.rank_documents(
-                    question=question,
+                    question=effective_question,
                     raw_docs=raw_docs,
                     top_k=min(self.top_k_retrieval, len(raw_docs)),
                 )
@@ -803,12 +880,26 @@ Contexte :
                 final_docs = self._post_filter_ranked_docs(ranked_docs)
 
         context = self.format_docs(final_docs)
-        answer = self.generate_answer(question, final_docs)
+        answer = self.generate_answer(question, final_docs, session_id)
         retrieved_documents = self.build_retrieved_documents(final_docs)
         retrieved_contexts = self.format_docs_list(final_docs)
 
+        retrieval_debug = self.retrieval_service.rank_documents_with_scores(
+            question=effective_question,
+            raw_docs=raw_docs,
+            top_k=len(raw_docs) if raw_docs else self.top_k_final,
+        )
+
+        self.memory_service.append_message(session_id, "user", question)
+        self.memory_service.append_message(session_id, "assistant", answer)
+
+        history = self.memory_service.get_history(session_id)
+
         self._trace_pipeline(
             question=question,
+            effective_question=effective_question,
+            session_id=session_id,
+            history=history,
             filter_debug=filter_debug,
             fallback_filter_debug=fallback_filter_debug,
             prefiltered_docs=prefiltered_docs,
@@ -820,14 +911,11 @@ Contexte :
             fallback_used=fallback_used,
         )
 
-        retrieval_debug = self.retrieval_service.rank_documents_with_scores(
-            question=question,
-            raw_docs=raw_docs,
-            top_k=len(raw_docs) if raw_docs else self.top_k_final,
-        )
-
         return {
             "question": question,
+            "effective_question": effective_question,
+            "session_id": session_id,
+            "history": history,
             "answer": answer,
             "docs": final_docs,
             "retrieved_documents": retrieved_documents,
@@ -838,34 +926,40 @@ Contexte :
             "retrieval_debug": self._serialize_for_json(retrieval_debug),
         }
 
-    def ask(self, question: str) -> AskResponse:
+    def ask(self, question: str, session_id: str = "default") -> AskResponse:
         """
         Exécute le pipeline RAG complet pour une question utilisateur.
         """
-        result = self._run_pipeline(question)
+        result = self._run_pipeline(question, session_id=session_id)
 
         return AskResponse(
             question=result["question"],
             answer=result["answer"],
             n_docs=len(result["docs"]),
             documents=result["retrieved_documents"],
+            session_id=result["session_id"],
         )
 
-    def ask_debug(self, question: str) -> dict[str, Any]:
+    def ask_debug(self, question: str, session_id: str = "default") -> dict[str, Any]:
         """
         Exécute le pipeline complet avec des informations de debug détaillées.
 
         Ce mode permet notamment d'inspecter :
+        - la question reformulée pour le retrieval
+        - l'historique conversationnel court
         - les documents finaux
         - les contextes envoyés au LLM
         - les étapes du filtrage
         - le fallback éventuel
         - les scores métier du ranking
         """
-        result = self._run_pipeline(question)
+        result = self._run_pipeline(question, session_id=session_id)
 
         response = {
             "question": result["question"],
+            "effective_question": result["effective_question"],
+            "session_id": result["session_id"],
+            "history": result["history"],
             "answer": result["answer"],
             "n_docs": len(result["docs"]),
             "documents": [

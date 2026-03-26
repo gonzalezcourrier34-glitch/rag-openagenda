@@ -1,140 +1,171 @@
-"""
-Service de mémoire locale minimal pour le système RAG.
-
-Ce module permet uniquement de :
-- charger la mémoire depuis un fichier JSON
-- sauvegarder la mémoire
-- ajouter une entrée
-- lire les dernières entrées
-- vider la mémoire
-
-Il ne contient volontairement aucune logique de ranking,
-d'interprétation conversationnelle ou de génération de réponse.
-"""
 from __future__ import annotations
 
 import json
-from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 
-BASE_DIR = Path(__file__).resolve().parents[1]
-DEFAULT_MEMORY_FILE = BASE_DIR / "data" / "memory" / "rag_memory.json"
-
-
 class MemoryService:
     """
-    Service minimal de mémoire locale persistée.
+    Service de gestion de la mémoire conversationnelle courte.
 
-    Parameters
-    ----------
-    memory_file : str | Path, default=DEFAULT_MEMORY_FILE
-        Chemin du fichier JSON utilisé pour la mémoire.
-    max_entries : int, default=100
-        Nombre maximum d'entrées conservées.
+    Cette mémoire est :
+    - persistée dans un fichier JSON local
+    - vidée au démarrage de l'API
+    - limitée à une fenêtre courte par session
+    - utilisée uniquement pour maintenir la cohérence
+      d'une conversation en cours
+
+    Le service ne sert pas de base de connaissance.
+    Il conserve seulement les derniers échanges utiles
+    à l'interprétation des questions utilisateur.
     """
 
     def __init__(
         self,
-        memory_file: str | Path = DEFAULT_MEMORY_FILE,
-        max_entries: int = 100,
+        memory_dir: str | Path = "data/memory",
+        memory_file: str = "conversations.json",
+        max_turns: int = 3,
     ) -> None:
-        self.memory_file = Path(memory_file)
-        self.max_entries = max_entries
-
-    def load_memory(self) -> list[dict[str, Any]]:
         """
-        Charge les entrées mémoire depuis le fichier JSON.
+        Initialise le service mémoire.
 
-        Returns
-        -------
-        list[dict[str, Any]]
-            Liste des entrées mémoire.
+        Parameters
+        ----------
+        memory_dir : str | Path, default="data/memory"
+            Dossier de stockage local.
+        memory_file : str, default="conversations.json"
+            Nom du fichier JSON de mémoire.
+        max_turns : int, default=3
+            Nombre maximal de tours conservés par session.
+            Un tour = 1 message utilisateur + 1 message assistant.
+        """
+        self.memory_dir = Path(memory_dir)
+        self.memory_file = self.memory_dir / memory_file
+        self.max_turns = max_turns
+        self.max_messages = max_turns * 2
+
+        self.memory_dir.mkdir(parents=True, exist_ok=True)
+
+    # ------------------------------------------------------------------
+    # Gestion fichier
+    # ------------------------------------------------------------------
+
+    def reset_memory(self) -> None:
+        """
+        Réinitialise complètement la mémoire au démarrage de l'API.
+        """
+        self._write_data({})
+
+    def _read_data(self) -> dict[str, list[dict[str, str]]]:
+        """
+        Lit le contenu mémoire depuis le fichier JSON.
         """
         if not self.memory_file.exists():
-            return []
+            return {}
 
         try:
-            with self.memory_file.open("r", encoding="utf-8") as file:
-                data = json.load(file)
-
-            return data if isinstance(data, list) else []
-
+            with self.memory_file.open("r", encoding="utf-8") as f:
+                data = json.load(f)
         except (json.JSONDecodeError, OSError):
+            return {}
+
+        if not isinstance(data, dict):
+            return {}
+
+        return data
+
+    def _write_data(self, data: dict[str, Any]) -> None:
+        """
+        Écrit le contenu mémoire dans le fichier JSON.
+        """
+        with self.memory_file.open("w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
+
+    # ------------------------------------------------------------------
+    # Gestion session
+    # ------------------------------------------------------------------
+
+    def get_history(self, session_id: str) -> list[dict[str, str]]:
+        """
+        Retourne l'historique court d'une session.
+        """
+        if not session_id or not session_id.strip():
             return []
 
-    def save_memory(self, entries: list[dict[str, Any]]) -> None:
+        data = self._read_data()
+        history = data.get(session_id, [])
+
+        if not isinstance(history, list):
+            return []
+
+        clean_history: list[dict[str, str]] = []
+        for item in history:
+            if not isinstance(item, dict):
+                continue
+
+            role = str(item.get("role", "")).strip().lower()
+            content = str(item.get("content", "")).strip()
+
+            if role in {"user", "assistant"} and content:
+                clean_history.append(
+                    {
+                        "role": role,
+                        "content": content,
+                    }
+                )
+
+        return clean_history[-self.max_messages :]
+
+    def append_message(self, session_id: str, role: str, content: str) -> None:
         """
-        Sauvegarde les entrées mémoire dans le fichier JSON.
-
-        Parameters
-        ----------
-        entries : list[dict[str, Any]]
-            Entrées à sauvegarder.
+        Ajoute un message à la mémoire courte d'une session.
         """
-        self.memory_file.parent.mkdir(parents=True, exist_ok=True)
+        session_id = (session_id or "").strip()
+        role = (role or "").strip().lower()
+        content = (content or "").strip()
 
-        with self.memory_file.open("w", encoding="utf-8") as file:
-            json.dump(entries, file, ensure_ascii=False, indent=2)
+        if not session_id or role not in {"user", "assistant"} or not content:
+            return
 
-    def clear(self) -> None:
+        data = self._read_data()
+
+        if session_id not in data or not isinstance(data[session_id], list):
+            data[session_id] = []
+
+        data[session_id].append(
+            {
+                "role": role,
+                "content": content,
+            }
+        )
+
+        data[session_id] = data[session_id][-self.max_messages :]
+        self._write_data(data)
+
+    def clear_session(self, session_id: str) -> None:
         """
-        Vide complètement la mémoire.
+        Supprime l'historique d'une session donnée.
         """
-        self.save_memory([])
+        session_id = (session_id or "").strip()
+        if not session_id:
+            return
 
-    def add_entry(
-        self,
-        question: str,
-        answer: str,
-        documents: list[dict[str, Any]] | None = None,
-    ) -> dict[str, Any]:
+        data = self._read_data()
+        data.pop(session_id, None)
+        self._write_data(data)
+
+    def format_history_for_prompt(self, session_id: str) -> str:
         """
-        Ajoute une entrée mémoire.
-
-        Parameters
-        ----------
-        question : str
-            Question utilisateur.
-        answer : str
-            Réponse générée.
-        documents : list[dict[str, Any]] | None, default=None
-            Documents associés à la réponse.
-
-        Returns
-        -------
-        dict[str, Any]
-            Entrée ajoutée.
+        Formate l'historique d'une session pour l'injection dans un prompt.
         """
-        entries = self.load_memory()
+        history = self.get_history(session_id)
+        if not history:
+            return ""
 
-        entry = {
-            "question": (question or "").strip(),
-            "answer": (answer or "").strip(),
-            "documents": documents or [],
-            "created_at": datetime.now().isoformat(timespec="seconds"),
-        }
+        lines: list[str] = []
+        for msg in history:
+            speaker = "Utilisateur" if msg["role"] == "user" else "Assistant"
+            lines.append(f"{speaker} : {msg['content']}")
 
-        entries.append(entry)
-        entries = entries[-self.max_entries:]
-
-        self.save_memory(entries)
-        return entry
-
-    def get_recent_entries(self, limit: int = 5) -> list[dict[str, Any]]:
-        """
-        Retourne les dernières entrées mémoire.
-
-        Parameters
-        ----------
-        limit : int, default=5
-            Nombre maximum d'entrées à retourner.
-
-        Returns
-        -------
-        list[dict[str, Any]]
-            Dernières entrées mémoire.
-        """
-        entries = self.load_memory()
-        return entries[-max(1, limit):]
+        return "\n".join(lines)

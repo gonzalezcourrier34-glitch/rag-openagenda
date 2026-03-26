@@ -13,6 +13,7 @@ L'application s'appuie sur les services internes suivants :
 - document_service pour charger les événements OpenAgenda
 - rag_service pour orchestrer le pipeline RAG
 - retrieval_service pour filtrer et reranker les documents candidats
+- memory_service pour gérer la mémoire conversationnelle courte
 """
 
 from __future__ import annotations
@@ -53,10 +54,14 @@ def _initialize_rag_service() -> None:
     Initialise le service RAG au démarrage de l'application.
 
     Stratégie :
+    - réinitialiser la mémoire conversationnelle courte
     - si l'index est déjà chargé en mémoire, ne rien faire
     - sinon, charger l'index depuis le disque s'il existe
     - sinon, construire un index par défaut à partir du corpus par défaut
     """
+    rag_service.memory_service.reset_memory()
+    logger.info("Mémoire conversationnelle réinitialisée.")
+
     if rag_service.is_index_loaded():
         logger.info("Index déjà chargé en mémoire.")
         return
@@ -145,7 +150,7 @@ app = FastAPI(
         "API REST locale pour interroger un assistant RAG "
         "de recommandation d'événements culturels"
     ),
-    version="1.1.0",
+    version="1.2.0",
     lifespan=lifespan,
 )
 
@@ -177,9 +182,15 @@ def health() -> HealthResponse:
 def ask(payload: AskRequest) -> AskResponse:
     """
     Exécute le pipeline RAG standard pour répondre à une question.
+
+    La requête peut inclure un `session_id` afin de conserver
+    une mémoire conversationnelle courte sur la session en cours.
     """
     try:
-        return rag_service.ask(payload.question)
+        return rag_service.ask(
+            question=payload.question,
+            session_id=payload.session_id,
+        )
     except Exception as exc:
         _raise_http_from_exception(
             exc,
@@ -196,9 +207,15 @@ def ask(payload: AskRequest) -> AskResponse:
 def ask_debug(payload: AskRequest) -> DebugResponse:
     """
     Exécute le pipeline RAG avec retour détaillé pour le debug.
+
+    La requête peut inclure un `session_id` afin d'inspecter
+    la mémoire conversationnelle courte associée.
     """
     try:
-        debug_data = rag_service.ask_debug(payload.question)
+        debug_data = rag_service.ask_debug(
+            question=payload.question,
+            session_id=payload.session_id,
+        )
         return DebugResponse(**debug_data)
     except Exception as exc:
         _raise_http_from_exception(

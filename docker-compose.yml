@@ -95,6 +95,20 @@ services:
     networks:
       - pocrag_network
 
+  mkdocs:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: pocrag_mkdocs
+    restart: unless-stopped
+    command: mkdocs serve -a 0.0.0.0:8002
+    ports:
+      - "8002:8002"
+    volumes:
+      - .:/app
+    networks:
+      - pocrag_network
+
 volumes:
   postgres_data:
   mlflow_data:
