@@ -188,6 +188,10 @@ Les faits utilisés dans la réponse doivent toujours provenir
 du contexte documentaire.
 
 Consignes de réponse :
+- Tu dois lister tous les événements pertinents présents dans le contexte.
+- Tu ne dois en omettre aucun.
+- Chaque document pertinent du contexte doit apparaître une fois dans la réponse.
+
 - Si aucun document pertinent n'est disponible, réponds exactement :
   "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
 
