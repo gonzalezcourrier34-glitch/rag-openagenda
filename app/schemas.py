@@ -266,11 +266,10 @@ class DebugResponse(BaseModel):
         default=None,
         description="Informations de debug du fallback de préfiltrage s'il a été déclenché.",
     )
-    retrieval_debug: dict = Field(
-        default_factory=dict,
+    retrieval_debug: list[dict] = Field(
+        default_factory=list,
         description="Informations de debug sur le ranking métier et le retrieval.",
     )
-
 
 class RebuildRequest(BaseModel):
     """

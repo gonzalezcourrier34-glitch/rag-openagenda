@@ -40,33 +40,73 @@ class FakeRAGService:
         )
 
     def ask_debug(self, question: str, session_id: str = "default"):
+        doc = {
+            "title": "Expo Archi",
+            "location_name": "Musée X",
+            "city": "Montpellier",
+            "region": "Occitanie",
+            "first_date": "2026-03-01",
+            "last_date": "2026-03-10",
+            "event_type": "Exposition",
+            "music_genre": "",
+            "price_info": "gratuit",
+            "is_free": True,
+            "vector_score": 0.42,
+            "final_score": 12.5,
+            "diversified_score": 12.5,
+            "url": "http://test.com",
+        }
+
         return {
             "question": question,
             "effective_question": question,
             "session_id": session_id,
             "history": [],
-            "answer": "Réponse debug",
-            "n_docs": 1,
-            "documents": [
-                {
-                    "title": "Expo Archi",
-                    "location_name": "Musée X",
-                    "city": "Montpellier",
-                    "region": "Occitanie",
-                    "first_date": "2026-03-01",
-                    "last_date": "2026-03-10",
-                    "event_type": "Exposition",
-                    "url": "http://test.com",
-                    "price_info": "gratuit",
-                    "is_free": True,
-                    "keywords_title": [],
-                    "score": None,
-                }
-            ],
-            "retrieved_contexts": ["Contenu test"],
+            "zone": "Montpellier",
+            "scope": "city",
+            "top_k_retrieval": 10,
+            "top_k_final": 3,
             "fallback_used": False,
-            "filter_debug": {"filters": {}, "n_input_docs": 1},
-            "retrieval_debug": {},
+            "n_input_docs": 1,
+            "n_prefiltered_docs": 1,
+            "n_raw_docs": 1,
+            "n_ranked_docs": 1,
+            "n_final_docs": 1,
+            "n_docs": 1,
+            "documents": [doc],
+            "filter_debug": {
+                "filters": {},
+                "n_input_docs": 1,
+                "n_after_city": 1,
+                "n_after_date": 1,
+                "n_after_type": 1,
+                "n_after_music": 1,
+                "n_after_cultural": 1,
+                "n_after_audience": 1,
+                "n_after_duration": 1,
+                "n_after_price": 1,
+            },
+            "fallback_filter_debug": None,
+            "prefiltered_docs": [doc],
+            "raw_docs": [doc],
+            "ranked_docs": [doc],
+            "final_docs": [doc],
+            "retrieved_contexts": ["Contenu test"],
+            "context": (
+                "Événement 1\n"
+                "Titre : Expo Archi\n"
+                "Lieu : Musée X\n"
+                "Ville : Montpellier\n"
+                "Région : Occitanie\n"
+                "Date de début : 2026-03-01\n"
+                "Date de fin : 2026-03-10\n"
+                "Type : Exposition\n"
+                "Genre musical : \n"
+                "Tarification : gratuit\n"
+                "Description : Exposition test\n"
+                "URL : http://test.com"
+            ),
+            "answer": "Réponse debug",
         }
 
     def rebuild_index(self, documents):
@@ -212,8 +252,11 @@ def test_ask_debug(monkeypatch):
     assert data["answer"] == "Réponse debug"
     assert data["n_docs"] == 1
     assert data["retrieved_contexts"] == ["Contenu test"]
+    assert "filter_debug" in data
+    assert "documents" in data
+    assert len(data["documents"]) == 1
     assert data["documents"][0]["title"] == "Expo Archi"
-
+    
 
 def test_rebuild(monkeypatch):
     monkeypatch.setattr("app.main.rag_service", FakeRAGService())

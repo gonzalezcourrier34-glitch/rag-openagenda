@@ -13,7 +13,7 @@ app.dependency_overrides[require_api_key] = lambda: "test-key"
 
 
 class FakeMemoryService:
-    def __init__(self):
+    def __init__(self) -> None:
         self.reset_called = False
 
     def reset_memory(self) -> None:
@@ -72,6 +72,40 @@ def test_initialize_rag_service_resets_memory_before_loading_existing_index(monk
     assert fake_rag.documents == ["doc1"]
 
 
+def test_initialize_rag_service_sets_default_zone_and_scope_when_loading_existing_index(
+    monkeypatch, tmp_path
+):
+    index_dir = tmp_path / "faiss_index"
+    index_dir.mkdir(parents=True, exist_ok=True)
+    (index_dir / "stub.faiss").write_text("ok", encoding="utf-8")
+
+    class FakeRAG:
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+            self.index_dir = index_dir
+            self.zone = None
+            self.scope = None
+
+        def is_index_loaded(self):
+            return False
+
+        def load_index(self):
+            pass
+
+        def set_documents(self, documents):
+            self.documents = documents
+
+    fake_rag = FakeRAG()
+
+    monkeypatch.setattr("app.main.rag_service", fake_rag)
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: ["doc1"])
+
+    _initialize_rag_service()
+
+    assert isinstance(fake_rag.zone, str)
+    assert isinstance(fake_rag.scope, str)
+
+
 def test_initialize_rag_service_resets_memory_before_building_index(monkeypatch, tmp_path):
     class FakeRAG:
         def __init__(self):
@@ -99,6 +133,58 @@ def test_initialize_rag_service_resets_memory_before_building_index(monkeypatch,
     assert fake_rag.documents == ["doc1", "doc2"]
 
 
+def test_initialize_rag_service_sets_default_zone_and_scope_when_building_index(monkeypatch, tmp_path):
+    class FakeRAG:
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+            self.index_dir = tmp_path / "missing_index"
+            self.zone = None
+            self.scope = None
+
+        def is_index_loaded(self):
+            return False
+
+        def rebuild_index(self, documents):
+            return len(documents)
+
+    fake_rag = FakeRAG()
+
+    monkeypatch.setattr("app.main.rag_service", fake_rag)
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: ["doc1", "doc2"])
+
+    _initialize_rag_service()
+
+    assert isinstance(fake_rag.zone, str)
+    assert isinstance(fake_rag.scope, str)
+
+
+def test_initialize_rag_service_returns_without_building_when_no_documents(monkeypatch, tmp_path):
+    class FakeRAG:
+        def __init__(self):
+            self.memory_service = FakeMemoryService()
+            self.index_dir = tmp_path / "missing_index"
+            self.rebuild_called = False
+            self.zone = None
+            self.scope = None
+
+        def is_index_loaded(self):
+            return False
+
+        def rebuild_index(self, documents):
+            self.rebuild_called = True
+            return len(documents)
+
+    fake_rag = FakeRAG()
+
+    monkeypatch.setattr("app.main.rag_service", fake_rag)
+    monkeypatch.setattr("app.main.load_documents", lambda zone, scope: [])
+
+    _initialize_rag_service()
+
+    assert fake_rag.memory_service.reset_called is True
+    assert fake_rag.rebuild_called is False
+
+
 @pytest.mark.anyio
 async def test_lifespan_swallow_init_exception_and_continue(monkeypatch):
     called = {"init": 0}
@@ -111,80 +197,6 @@ async def test_lifespan_swallow_init_exception_and_continue(monkeypatch):
 
     async with lifespan(app):
         assert called["init"] == 1
-
-
-def test_ask_route_passes_session_id_to_rag_service(monkeypatch):
-    captured = {}
-
-    class FakeRAG:
-        def ask(self, question, session_id="default"):
-            from app.schemas import AskResponse
-
-            captured["question"] = question
-            captured["session_id"] = session_id
-
-            return AskResponse(
-                question=question,
-                answer="Réponse test",
-                n_docs=0,
-                documents=[],
-                session_id=session_id,
-            )
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
-    client = TestClient(app)
-
-    response = client.post(
-        "/ask",
-        json={
-            "question": "Je cherche une exposition",
-            "session_id": "session-extra-1",
-        },
-    )
-
-    assert response.status_code == 200
-    assert captured["question"] == "Je cherche une exposition"
-    assert captured["session_id"] == "session-extra-1"
-    assert response.json()["session_id"] == "session-extra-1"
-
-
-def test_ask_debug_route_passes_session_id_to_rag_service(monkeypatch):
-    captured = {}
-
-    class FakeRAG:
-        def ask_debug(self, question, session_id="default"):
-            captured["question"] = question
-            captured["session_id"] = session_id
-
-            return {
-                "question": question,
-                "effective_question": question,
-                "session_id": session_id,
-                "history": [],
-                "answer": "Réponse debug",
-                "n_docs": 0,
-                "documents": [],
-                "retrieved_contexts": [],
-                "fallback_used": False,
-                "filter_debug": {},
-                "retrieval_debug": {},
-            }
-
-    monkeypatch.setattr("app.main.rag_service", FakeRAG())
-    client = TestClient(app)
-
-    response = client.post(
-        "/ask/debug",
-        json={
-            "question": "Et les gratuites ?",
-            "session_id": "session-extra-2",
-        },
-    )
-
-    assert response.status_code == 200
-    assert captured["question"] == "Et les gratuites ?"
-    assert captured["session_id"] == "session-extra-2"
-    assert response.json()["session_id"] == "session-extra-2"
 
 
 def test_rebuild_uses_defaults_when_payload_fields_are_null(monkeypatch):

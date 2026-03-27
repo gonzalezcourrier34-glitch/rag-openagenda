@@ -24,6 +24,17 @@ Le filtrage doit rester utile sans devenir trop agressif :
 Ce service ne calcule aucun score métier.
 Il se contente de sélectionner les documents compatibles avec les
 contraintes explicites de la question.
+
+Principes de conception
+-----------------------
+Le service suit quelques règles simples :
+
+- le filtrage fort doit reposer sur des signaux explicites
+- la logique doit rester lisible et explicable
+- les champs documentaires enrichis dans `document_service`
+  doivent être réutilisés autant que possible
+- les filtres faibles ne doivent pas casser le rappel
+- les étapes du pipeline doivent pouvoir être inspectées facilement
 """
 
 from __future__ import annotations
@@ -76,6 +87,28 @@ class FilterService:
         "nantes",
     }
 
+    STRONG_CULTURAL_EVENT_TYPES = {
+        "exposition",
+        "concert",
+        "festival",
+        "projection",
+        "spectacle",
+        "conte",
+        "lecture",
+    }
+
+    WEAK_CULTURAL_EVENT_TYPES = {
+        "atelier",
+        "conference",
+        "visite",
+    }
+
+    WEEKEND_TIME_MODES = {
+        "weekend_explicit",
+        "weekend_this",
+        "weekend_next",
+    }
+
     def __init__(self) -> None:
         """
         Initialise le service de filtrage avec son service lexical partagé.
@@ -88,30 +121,31 @@ class FilterService:
 
     def _safe(self, value: object) -> str:
         """
-        Convertit une valeur en chaîne de caractères.
+        Convertit une valeur potentiellement nulle en chaîne.
 
         Parameters
         ----------
         value : object
-            Valeur potentiellement nulle.
+            Valeur brute.
 
         Returns
         -------
         str
-            Chaîne vide si la valeur est nulle, sinon conversion en texte.
+            Chaîne vide si la valeur est nulle, sinon conversion textuelle.
         """
         return "" if value is None else str(value)
 
     def normalize_text(self, text: object) -> str:
         """
-        Normalise un texte pour faciliter les comparaisons.
+        Normalise un texte pour faciliter les comparaisons lexicales.
 
-        Cette méthode délègue la normalisation au service lexical partagé.
+        Cette méthode délègue au service lexical partagé afin de garantir
+        une cohérence complète avec les autres couches du pipeline.
 
         Parameters
         ----------
         text : object
-            Texte brut à normaliser.
+            Texte brut.
 
         Returns
         -------
@@ -127,7 +161,7 @@ class FilterService:
         Parameters
         ----------
         value : object
-            Date brute au format supposé ISO.
+            Valeur supposée contenir une date ISO.
 
         Returns
         -------
@@ -159,7 +193,7 @@ class FilterService:
         Returns
         -------
         date | None
-            Date valide si la combinaison est correcte, sinon None.
+            Date valide, sinon None.
         """
         try:
             return date(year, month, day)
@@ -170,24 +204,40 @@ class FilterService:
     # Lecture des métadonnées documentaires
     # ------------------------------------------------------------------
 
-    def _doc_dates(self, doc: Document) -> tuple[date | None, date | None]:
+    def _metadata(self, doc: Document) -> dict[str, Any]:
         """
-        Retourne les bornes de dates d'un document.
-
-        Si la date de début existe mais pas la date de fin, on suppose
-        que l'événement se déroule sur une seule journée.
+        Retourne les métadonnées du document.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionnaire de métadonnées.
+        """
+        return doc.metadata or {}
+
+    def _doc_dates(self, doc: Document) -> tuple[date | None, date | None]:
+        """
+        Retourne les bornes temporelles d'un document.
+
+        Si seule la date de début est disponible, l'événement est
+        considéré comme mono-jour.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
 
         Returns
         -------
         tuple[date | None, date | None]
             Date de début, date de fin.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         first_date = self.parse_iso_date(md.get("first_date"))
         last_date = self.parse_iso_date(md.get("last_date"))
 
@@ -203,35 +253,36 @@ class FilterService:
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         str
             Ville normalisée.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         return md.get("city_norm") or self.normalize_text(md.get("city", ""))
 
     def _doc_event_type(self, doc: Document) -> str:
         """
         Retourne le type d'événement normalisé d'un document.
 
-        On privilégie le champ `canonical_event_type` lorsqu'il est disponible.
+        On privilégie le type canonique lorsqu'il est disponible.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         str
             Type d'événement normalisé.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         return (
-            self.normalize_text(md.get("canonical_event_type", ""))
+            md.get("canonical_event_type_norm")
+            or self.normalize_text(md.get("canonical_event_type", ""))
             or md.get("event_type_norm")
             or self.normalize_text(md.get("event_type", ""))
         )
@@ -243,34 +294,34 @@ class FilterService:
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         str
             Genre musical normalisé.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         return md.get("music_genre_norm") or self.normalize_text(md.get("music_genre", ""))
 
     def _doc_search_text(self, doc: Document) -> str:
         """
-        Retourne le texte de recherche consolidé et normalisé du document.
+        Retourne un texte documentaire consolidé et normalisé.
 
-        Ce texte sert de filet de secours pour le matching lexical, même
-        si certains champs structurés sont absents ou incomplets.
+        Le champ `search_text` est prioritaire car il a été conçu pour
+        le matching lexical léger et la recherche sémantique.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         str
-            Texte documentaire consolidé.
+            Texte consolidé du document.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         search_text = md.get("search_text")
         if search_text:
             return self.normalize_text(search_text)
@@ -294,14 +345,14 @@ class FilterService:
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         bool | None
             True si gratuit, False si payant, None si inconnu.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         return md.get("is_free")
 
     def _doc_is_single_day(self, doc: Document) -> bool | None:
@@ -311,14 +362,14 @@ class FilterService:
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         bool | None
-            Booléen si l'information est fiable, sinon None.
+            Booléen fiable si disponible, sinon None.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         value = md.get("is_single_day")
 
         if isinstance(value, bool):
@@ -331,19 +382,19 @@ class FilterService:
         Retourne la durée de l'événement en jours.
 
         Si la durée n'est pas disponible directement, elle est recalculée
-        à partir des dates de début et de fin.
+        à partir des dates du document.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         int | None
-            Durée en jours, ou None si elle ne peut pas être estimée.
+            Durée en jours, ou None si indéterminable.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         value = md.get("duration_days")
 
         try:
@@ -362,19 +413,19 @@ class FilterService:
 
     def _doc_derived_event_terms(self, doc: Document) -> set[str]:
         """
-        Retourne les termes métier dérivés pour le document.
+        Retourne les termes métier dérivés du document.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         set[str]
             Ensemble de termes normalisés.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         terms = md.get("derived_event_terms", [])
         if not isinstance(terms, list):
             return set()
@@ -387,19 +438,19 @@ class FilterService:
 
     def _doc_derived_music_terms(self, doc: Document) -> set[str]:
         """
-        Retourne les termes musicaux dérivés pour le document.
+        Retourne les termes musicaux dérivés du document.
 
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         set[str]
-            Ensemble de termes normalisés.
+            Ensemble de termes musicaux normalisés.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         terms = md.get("derived_music_terms", [])
         if not isinstance(terms, list):
             return set()
@@ -417,14 +468,14 @@ class FilterService:
         Parameters
         ----------
         doc : Document
-            Document à inspecter.
+            Document inspecté.
 
         Returns
         -------
         set[str]
-            Ensemble de termes normalisés.
+            Ensemble de termes de public normalisés.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         terms = md.get("audience_terms", [])
         if not isinstance(terms, list):
             return set()
@@ -434,6 +485,91 @@ class FilterService:
             for term in terms
             if self.normalize_text(term)
         }
+
+    def _doc_is_strong_cultural_candidate(self, doc: Document) -> bool:
+        """
+        Retourne le drapeau culturel fort du document.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si le document est marqué comme culturel fort.
+        """
+        md = self._metadata(doc)
+        return bool(md.get("is_strong_cultural_candidate", False))
+
+    def _doc_is_weak_cultural_candidate(self, doc: Document) -> bool:
+        """
+        Retourne le drapeau culturel faible du document.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si le document est marqué comme culturel faible.
+        """
+        md = self._metadata(doc)
+        return bool(md.get("is_weak_cultural_candidate", False))
+
+    def _doc_has_market_signal(self, doc: Document) -> bool:
+        """
+        Retourne le drapeau marché / braderie du document.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si un signal de marché est présent.
+        """
+        md = self._metadata(doc)
+        return bool(md.get("has_market_signal", False))
+
+    def _doc_has_repair_signal(self, doc: Document) -> bool:
+        """
+        Retourne le drapeau réparation / repair café du document.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si un signal de réparation est présent.
+        """
+        md = self._metadata(doc)
+        return bool(md.get("has_repair_signal", False))
+
+    def _doc_has_business_signal(self, doc: Document) -> bool:
+        """
+        Retourne le drapeau business / networking du document.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si un signal business est présent.
+        """
+        md = self._metadata(doc)
+        return bool(md.get("has_business_signal", False))
 
     # ------------------------------------------------------------------
     # Extraction des contraintes depuis la question
@@ -451,7 +587,7 @@ class FilterService:
         Returns
         -------
         str | None
-            Ville détectée si elle est explicitement mentionnée.
+            Ville détectée si présente.
         """
         for city in sorted(self.KNOWN_CITIES, key=len, reverse=True):
             if re.search(rf"\b{re.escape(city)}\b", question_norm):
@@ -460,7 +596,7 @@ class FilterService:
 
     def _extract_duration_filter(self, question_norm: str) -> str | None:
         """
-        Détecte une contrainte explicite sur la durée de l'événement.
+        Détecte une contrainte explicite de durée.
 
         Parameters
         ----------
@@ -470,9 +606,7 @@ class FilterService:
         Returns
         -------
         str | None
-            - "single_day" pour une journée
-            - "multi_day" pour plusieurs jours
-            - None sinon
+            `"single_day"`, `"multi_day"` ou None.
         """
         if re.search(
             r"\b(sur une journee|en une journee|a la journee|journee unique|ponctuel)\b",
@@ -496,10 +630,17 @@ class FilterService:
         """
         Retourne les bornes d'un mois sous forme d'intervalle semi-ouvert.
 
+        Parameters
+        ----------
+        year : int
+            Année.
+        month : int
+            Mois.
+
         Returns
         -------
         tuple[date, date]
-            Date de début du mois, date du mois suivant.
+            Début du mois, début du mois suivant.
         """
         month_start = date(year, month, 1)
 
@@ -513,6 +654,16 @@ class FilterService:
     def _get_year_bounds(self, year: int) -> tuple[date, date]:
         """
         Retourne les bornes d'une année sous forme d'intervalle semi-ouvert.
+
+        Parameters
+        ----------
+        year : int
+            Année.
+
+        Returns
+        -------
+        tuple[date, date]
+            Début de l'année, début de l'année suivante.
         """
         return date(year, 1, 1), date(year + 1, 1, 1)
 
@@ -527,7 +678,7 @@ class FilterService:
         Parameters
         ----------
         reference : date
-            Date de départ utilisée comme repère.
+            Date de référence.
         next_weekend : bool, default=False
             Si True, renvoie le week-end suivant.
 
@@ -559,14 +710,20 @@ class FilterService:
         """
         Extrait un week-end explicitement formulé dans la question.
 
-        Exemples :
-        - "week-end du 28 et 29 mars 2026"
-        - "week-end du 28 mars 2026"
+        Exemples gérés :
+
+        - `week-end du 28 et 29 mars 2026`
+        - `week-end du 28 mars 2026`
+
+        Parameters
+        ----------
+        question_norm : str
+            Question normalisée.
 
         Returns
         -------
         tuple[date | None, date | None]
-            Date de début et date de fin du week-end détecté.
+            Début et fin du week-end si détectés.
         """
         month_names = "|".join(self.MONTHS.keys())
 
@@ -624,11 +781,27 @@ class FilterService:
         max_span_days: int = 3,
     ) -> bool:
         """
-        Vérifie qu'un document chevauche le week-end demandé
-        et que sa durée totale reste raisonnable.
+        Vérifie qu'un document chevauche le week-end demandé et reste
+        raisonnablement concentré dans le temps.
 
-        Cette règle évite de faire remonter de très longs événements
-        pour une demande très ciblée sur un week-end précis.
+        Cette contrainte évite de faire remonter de très longs événements
+        pour une demande très ciblée sur un week-end.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        start_date : date
+            Début du week-end.
+        end_date : date
+            Fin du week-end.
+        max_span_days : int, default=3
+            Durée maximale tolérée du document.
+
+        Returns
+        -------
+        bool
+            True si le document est compatible.
         """
         first_date, last_date = self._doc_dates(doc)
 
@@ -650,6 +823,7 @@ class FilterService:
         Extrait les filtres temporels présents dans la question.
 
         Cas gérés :
+
         - week-end explicite
         - ce week-end
         - week-end prochain
@@ -658,6 +832,16 @@ class FilterService:
         - date exacte
         - mois + année
         - année seule
+
+        Parameters
+        ----------
+        question_norm : str
+            Question normalisée.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionnaire de filtres temporels.
         """
         filters: dict[str, Any] = {
             "exact_date": None,
@@ -778,17 +962,24 @@ class FilterService:
         """
         Extrait les filtres structurés depuis la question utilisateur.
 
+        Principe important :
+        un filtre ne doit s'activer que si la contrainte est explicite
+        dans la question.
+
+        La ville par défaut peut servir à borner le corpus, mais ne compte
+        pas comme contrainte forte.
+
         Parameters
         ----------
         question : str
-            Question brute de l'utilisateur.
+            Question brute.
         default_city : str | None, default=None
-            Ville par défaut à appliquer si la question ne cite pas explicitement de ville.
+            Ville par défaut éventuelle.
 
         Returns
         -------
         dict[str, Any]
-            Ensemble des filtres structurés détectés.
+            Ensemble des filtres détectés.
         """
         question_norm = self.normalize_text(question)
         date_filters = self._extract_date_filters(question_norm)
@@ -807,10 +998,11 @@ class FilterService:
             "keywords": lexical_signals["keywords"],
             "city": city,
             "explicit_city": explicit_city,
-            "event_type": lexical_signals["event_type"],
-            "music_genre": lexical_signals["music_genre"],
+            "event_type": lexical_signals.get("event_type"),
+            "music_genre": lexical_signals.get("music_genre"),
             "audience_terms": lexical_signals.get("audience_terms", []),
             "is_cultural_query": lexical_signals.get("is_cultural_query", False),
+            "is_broad_activity_query": lexical_signals.get("is_broad_activity_query", False),
             "duration_filter": self._extract_duration_filter(question_norm),
             "exact_date": date_filters["exact_date"],
             "month": date_filters["month"],
@@ -828,6 +1020,18 @@ class FilterService:
     def matches_city(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
         Vérifie si un document respecte le filtre de ville.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document respecte la ville.
         """
         city = filters.get("city")
         if not city:
@@ -842,6 +1046,18 @@ class FilterService:
     ) -> bool:
         """
         Vérifie si un document supporte au moins une variante lexicale.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        variants : list[str]
+            Variantes recherchées.
+
+        Returns
+        -------
+        bool
+            True si au moins une variante est présente.
         """
         if not variants:
             return False
@@ -856,9 +1072,7 @@ class FilterService:
         Returns
         -------
         str
-            - "exact"
-            - "variant"
-            - "mismatch"
+            `"exact"`, `"variant"` ou `"mismatch"`.
         """
         if not requested_event_type:
             return "variant"
@@ -869,10 +1083,19 @@ class FilterService:
 
         variants = self.lexical_service.EVENT_TYPE_TERMS.get(requested_event_type, [])
         if self._supports_any_variant(doc, variants):
+            derived_terms = self._doc_derived_event_terms(doc)
+
+            if doc_event_type and doc_event_type != requested_event_type:
+                if requested_event_type in derived_terms:
+                    return "variant"
+                return "mismatch"
+
             return "variant"
 
         derived_terms = self._doc_derived_event_terms(doc)
         if requested_event_type in derived_terms:
+            if doc_event_type and doc_event_type != requested_event_type:
+                return "mismatch"
             return "variant"
 
         return "mismatch"
@@ -880,6 +1103,16 @@ class FilterService:
     def _is_musical_document(self, doc: Document) -> bool:
         """
         Indique si le document semble réellement musical.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si le document présente un signal musical suffisamment fort.
         """
         doc_event_type = self._doc_event_type(doc)
         if doc_event_type in self.lexical_service.MUSICAL_EVENT_TYPES:
@@ -893,7 +1126,7 @@ class FilterService:
             return True
 
         doc_text = self._doc_search_text(doc)
-        return self.lexical_service.contains_any_term(
+        musical_hits = self.lexical_service.count_matching_terms(
             doc_text,
             [
                 "concert",
@@ -911,28 +1144,77 @@ class FilterService:
                 "scène",
             ],
         )
+        return musical_hits >= 2
 
     def _is_cultural_document(self, doc: Document) -> bool:
         """
         Indique si le document semble culturel.
+
+        La logique reste volontairement resserrée :
+
+        - priorité aux drapeaux documentaires enrichis
+        - acceptation directe des types culturels forts
+        - acceptation prudente des types faibles
+        - rejet des signaux implicites négatifs comme marché, réparation ou business
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+
+        Returns
+        -------
+        bool
+            True si le document est jugé culturel.
         """
-        doc_event_type = self._doc_event_type(doc)
-        if doc_event_type in self.lexical_service.CULTURAL_EVENT_TYPES:
+        if self._doc_has_business_signal(doc):
+            return False
+
+        if self._doc_has_market_signal(doc):
+            return False
+
+        if self._doc_has_repair_signal(doc):
+            return False
+
+        if self._doc_is_strong_cultural_candidate(doc):
             return True
 
+        doc_event_type = self._doc_event_type(doc)
+        if doc_event_type in self.STRONG_CULTURAL_EVENT_TYPES:
+            return True
+
+        if self._doc_is_weak_cultural_candidate(doc):
+            doc_text = self._doc_search_text(doc)
+            return self.lexical_service.contains_any_term(
+                doc_text,
+                self.lexical_service.STRONG_CULTURAL_TERMS,
+            )
+
         derived_terms = self._doc_derived_event_terms(doc)
-        if derived_terms & self.lexical_service.CULTURAL_EVENT_TYPES:
+        if derived_terms & self.STRONG_CULTURAL_EVENT_TYPES:
             return True
 
         doc_text = self._doc_search_text(doc)
         return self.lexical_service.contains_any_term(
             doc_text,
-            self.lexical_service.CULTURAL_TERMS,
+            self.lexical_service.STRONG_CULTURAL_TERMS,
         )
 
     def matches_event_type(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
         Vérifie si un document respecte un type d'événement explicite.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document respecte le type demandé.
         """
         event_type = filters.get("event_type")
         if not event_type:
@@ -943,6 +1225,18 @@ class FilterService:
     def matches_music_genre(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
         Vérifie si un document respecte un genre musical explicite.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document respecte le genre musical demandé.
         """
         music_genre = filters.get("music_genre")
         if not music_genre:
@@ -958,13 +1252,35 @@ class FilterService:
 
         variants = self.lexical_service.MUSIC_GENRE_TERMS.get(music_genre, [])
         if self._supports_any_variant(doc, variants):
-            return self._is_musical_document(doc)
+            if not self._is_musical_document(doc):
+                return False
+
+            if doc_music_genre and doc_music_genre != music_genre:
+                return False
+
+            return True
 
         return False
 
     def matches_cultural_scope(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
-        Vérifie si un document respecte une requête culturelle large.
+        Vérifie si un document respecte une contrainte culturelle explicite.
+
+        Important :
+        ce filtre ne doit s'activer que si la question contient
+        explicitement une contrainte culturelle.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document est compatible avec une contrainte culturelle.
         """
         if not filters.get("is_cultural_query"):
             return True
@@ -974,6 +1290,18 @@ class FilterService:
     def matches_duration(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
         Vérifie si un document respecte une contrainte explicite de durée.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si la durée est compatible.
         """
         duration_filter = filters.get("duration_filter")
         if not duration_filter:
@@ -1002,8 +1330,19 @@ class FilterService:
         """
         Vérifie si un document respecte le filtre temporel.
 
-        La logique repose principalement sur le chevauchement
-        de période lorsque cela est possible.
+        La logique repose principalement sur le chevauchement de période.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document est compatible temporellement.
         """
         exact_date = filters.get("exact_date")
         month = filters.get("month")
@@ -1025,7 +1364,7 @@ class FilterService:
         time_mode = filters.get("time_mode")
 
         if start_date and end_date:
-            if time_mode in {"weekend_explicit", "weekend_this", "weekend_next"}:
+            if time_mode in self.WEEKEND_TIME_MODES:
                 return self._matches_weekend_with_max_span(
                     doc=doc,
                     start_date=start_date,
@@ -1052,9 +1391,19 @@ class FilterService:
         """
         Vérifie si un document respecte le filtre de tarification.
 
-        Règle retenue :
-        - si la gratuité/payant est connue, on filtre strictement
-        - si l'information est absente, on reste souple
+        La logique reste souple si l'information tarifaire est absente.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le document est compatible avec le filtre tarifaire.
         """
         price_filter = filters.get("price_filter")
         if not price_filter:
@@ -1081,6 +1430,18 @@ class FilterService:
     def matches_audience(self, doc: Document, filters: dict[str, Any]) -> bool:
         """
         Vérifie si un document respecte une contrainte simple de public.
+
+        Parameters
+        ----------
+        doc : Document
+            Document inspecté.
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si le public cible est compatible.
         """
         requested_terms = filters.get("audience_terms") or []
         if not requested_terms:
@@ -1107,8 +1468,20 @@ class FilterService:
         Indique si la question contient au moins une contrainte forte.
 
         Important :
-        - la ville par défaut ne doit pas compter comme contrainte forte
-        - seule une ville explicitement citée doit activer ce levier
+
+        - la ville par défaut ne compte pas comme contrainte forte
+        - seule une ville explicitement mentionnée active ce levier
+        - une requête large d'activité (`que faire`) ne compte pas comme filtre fort
+
+        Parameters
+        ----------
+        filters : dict[str, Any]
+            Filtres extraits.
+
+        Returns
+        -------
+        bool
+            True si au moins une contrainte forte est présente.
         """
         return any(
             [
@@ -1127,6 +1500,32 @@ class FilterService:
             ]
         )
 
+    def _empty_pipeline_result(self, docs_input: list[Document]) -> dict[str, list[Document]]:
+        """
+        Retourne une structure de pipeline vide standardisée.
+
+        Parameters
+        ----------
+        docs_input : list[Document]
+            Documents d'entrée.
+
+        Returns
+        -------
+        dict[str, list[Document]]
+            Pipeline vide.
+        """
+        return {
+            "input": docs_input,
+            "after_city": [],
+            "after_date": [],
+            "after_type": [],
+            "after_music": [],
+            "after_cultural": [],
+            "after_audience": [],
+            "after_duration": [],
+            "after_price": [],
+        }
+
     def _run_filter_pipeline(
         self,
         filters: dict[str, Any],
@@ -1135,29 +1534,34 @@ class FilterService:
         """
         Exécute le pipeline complet de filtrage étape par étape.
 
-        Cette méthode centralise la logique commune entre :
+        Ordre métier appliqué :
 
-        - `filter_documents`
-        - `filter_documents_with_debug`
+        1. lieu
+        2. date
+        3. type
+        4. musique
+        5. culturel
+        6. audience
+        7. durée
+        8. prix
 
-        Elle permet de conserver exactement la même logique de filtrage
-        tout en évitant la duplication du code.
+        Parameters
+        ----------
+        filters : dict[str, Any]
+            Filtres extraits.
+        docs : list[Document]
+            Documents candidats.
 
         Returns
         -------
         dict[str, list[Document]]
-            Documents intermédiaires à chaque étape du pipeline.
+            Documents intermédiaires à chaque étape.
         """
         docs_input = docs[:]
         docs_after_city = docs_input[:]
-        docs_after_type = docs_after_city[:]
-        docs_after_music = docs_after_type[:]
-        docs_after_cultural = docs_after_music[:]
-        docs_after_audience = docs_after_cultural[:]
-        docs_after_duration = docs_after_audience[:]
-        docs_after_date = docs_after_duration[:]
-        docs_after_price = docs_after_date[:]
 
+        # 1. Ville
+        # La ville par défaut peut être utilisée pour borner le corpus local.
         if filters.get("city"):
             docs_after_city = [
                 doc for doc in docs_after_city
@@ -1165,113 +1569,10 @@ class FilterService:
             ]
 
         if not docs_after_city:
-            return {
-                "input": docs_input,
-                "after_city": [],
-                "after_type": [],
-                "after_music": [],
-                "after_cultural": [],
-                "after_audience": [],
-                "after_duration": [],
-                "after_date": [],
-                "after_price": [],
-            }
+            return self._empty_pipeline_result(docs_input)
 
-        if not self.has_strong_filters(filters):
-            return {
-                "input": docs_input,
-                "after_city": docs_after_city,
-                "after_type": docs_after_city,
-                "after_music": docs_after_city,
-                "after_cultural": docs_after_city,
-                "after_audience": docs_after_city,
-                "after_duration": docs_after_city,
-                "after_date": docs_after_city,
-                "after_price": docs_after_city,
-            }
-
-        if filters.get("event_type"):
-            docs_after_type = [
-                doc for doc in docs_after_city
-                if self.matches_event_type(doc, filters)
-            ]
-        else:
-            docs_after_type = docs_after_city
-
-        if not docs_after_type:
-            return {
-                "input": docs_input,
-                "after_city": docs_after_city,
-                "after_type": [],
-                "after_music": [],
-                "after_cultural": [],
-                "after_audience": [],
-                "after_duration": [],
-                "after_date": [],
-                "after_price": [],
-            }
-
-        if filters.get("music_genre"):
-            docs_after_music = [
-                doc for doc in docs_after_type
-                if self.matches_music_genre(doc, filters)
-            ]
-        else:
-            docs_after_music = docs_after_type
-
-        if not docs_after_music:
-            return {
-                "input": docs_input,
-                "after_city": docs_after_city,
-                "after_type": docs_after_type,
-                "after_music": [],
-                "after_cultural": [],
-                "after_audience": [],
-                "after_duration": [],
-                "after_date": [],
-                "after_price": [],
-            }
-
-        if filters.get("is_cultural_query"):
-            docs_after_cultural = [
-                doc for doc in docs_after_music
-                if self.matches_cultural_scope(doc, filters)
-            ]
-        else:
-            docs_after_cultural = docs_after_music
-
-        if not docs_after_cultural:
-            return {
-                "input": docs_input,
-                "after_city": docs_after_city,
-                "after_type": docs_after_type,
-                "after_music": docs_after_music,
-                "after_cultural": [],
-                "after_audience": [],
-                "after_duration": [],
-                "after_date": [],
-                "after_price": [],
-            }
-
-        if filters.get("audience_terms"):
-            audience_docs = [
-                doc for doc in docs_after_cultural
-                if self.matches_audience(doc, filters)
-            ]
-            docs_after_audience = audience_docs if audience_docs else docs_after_cultural
-        else:
-            docs_after_audience = docs_after_cultural
-
-        if filters.get("duration_filter"):
-            duration_docs = [
-                doc for doc in docs_after_audience
-                if self.matches_duration(doc, filters)
-            ]
-            docs_after_duration = duration_docs if duration_docs else docs_after_audience
-        else:
-            docs_after_duration = docs_after_audience
-
-        if any(
+        # 2. Date
+        has_date_filter = any(
             [
                 filters.get("exact_date"),
                 filters.get("month"),
@@ -1279,45 +1580,141 @@ class FilterService:
                 filters.get("start_date"),
                 filters.get("end_date"),
             ]
-        ):
-            docs_after_date = [
-                doc for doc in docs_after_duration
-                if self.matches_date(doc, filters)
-            ]
-        else:
-            docs_after_date = docs_after_duration
+        )
+
+        docs_after_date = (
+            [doc for doc in docs_after_city if self.matches_date(doc, filters)]
+            if has_date_filter
+            else docs_after_city
+        )
 
         if not docs_after_date:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            return result
+
+        # Si aucune contrainte forte explicite autre que ville/date,
+        # on n'active pas les autres filtres.
+        has_other_explicit_filters = any(
+            [
+                filters.get("event_type"),
+                filters.get("music_genre"),
+                filters.get("is_cultural_query"),
+                filters.get("duration_filter"),
+                filters.get("audience_terms"),
+                filters.get("price_filter"),
+            ]
+        )
+
+        if not self.has_strong_filters(filters) or not has_other_explicit_filters:
             return {
                 "input": docs_input,
                 "after_city": docs_after_city,
-                "after_type": docs_after_type,
-                "after_music": docs_after_music,
-                "after_cultural": docs_after_cultural,
-                "after_audience": docs_after_audience,
-                "after_duration": docs_after_duration,
-                "after_date": [],
-                "after_price": [],
+                "after_date": docs_after_date,
+                "after_type": docs_after_date,
+                "after_music": docs_after_date,
+                "after_cultural": docs_after_date,
+                "after_audience": docs_after_date,
+                "after_duration": docs_after_date,
+                "after_price": docs_after_date,
             }
 
-        if filters.get("price_filter"):
-            price_docs = [
-                doc for doc in docs_after_date
-                if self.matches_price(doc, filters)
-            ]
-            docs_after_price = price_docs if price_docs else docs_after_date
-        else:
-            docs_after_price = docs_after_date
+        # 3. Type
+        docs_after_type = (
+            [doc for doc in docs_after_date if self.matches_event_type(doc, filters)]
+            if filters.get("event_type")
+            else docs_after_date
+        )
+        if not docs_after_type:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            return result
+
+        # 4. Musique
+        docs_after_music = (
+            [doc for doc in docs_after_type if self.matches_music_genre(doc, filters)]
+            if filters.get("music_genre")
+            else docs_after_type
+        )
+        if not docs_after_music:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            result["after_type"] = docs_after_type
+            return result
+
+        # 5. Culturel
+        docs_after_cultural = (
+            [doc for doc in docs_after_music if self.matches_cultural_scope(doc, filters)]
+            if filters.get("is_cultural_query")
+            else docs_after_music
+        )
+        if not docs_after_cultural:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            result["after_type"] = docs_after_type
+            result["after_music"] = docs_after_music
+            return result
+
+        # 6. Audience
+        docs_after_audience = (
+            [doc for doc in docs_after_cultural if self.matches_audience(doc, filters)]
+            if filters.get("audience_terms")
+            else docs_after_cultural
+        )
+        if filters.get("audience_terms") and not docs_after_audience:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            result["after_type"] = docs_after_type
+            result["after_music"] = docs_after_music
+            result["after_cultural"] = docs_after_cultural
+            return result
+
+        # 7. Durée
+        docs_after_duration = (
+            [doc for doc in docs_after_audience if self.matches_duration(doc, filters)]
+            if filters.get("duration_filter")
+            else docs_after_audience
+        )
+        if filters.get("duration_filter") and not docs_after_duration:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            result["after_type"] = docs_after_type
+            result["after_music"] = docs_after_music
+            result["after_cultural"] = docs_after_cultural
+            result["after_audience"] = docs_after_audience
+            return result
+
+        # 8. Prix
+        docs_after_price = (
+            [doc for doc in docs_after_duration if self.matches_price(doc, filters)]
+            if filters.get("price_filter")
+            else docs_after_duration
+        )
+        if filters.get("price_filter") and not docs_after_price:
+            result = self._empty_pipeline_result(docs_input)
+            result["after_city"] = docs_after_city
+            result["after_date"] = docs_after_date
+            result["after_type"] = docs_after_type
+            result["after_music"] = docs_after_music
+            result["after_cultural"] = docs_after_cultural
+            result["after_audience"] = docs_after_audience
+            result["after_duration"] = docs_after_duration
+            return result
 
         return {
             "input": docs_input,
             "after_city": docs_after_city,
+            "after_date": docs_after_date,
             "after_type": docs_after_type,
             "after_music": docs_after_music,
             "after_cultural": docs_after_cultural,
             "after_audience": docs_after_audience,
             "after_duration": docs_after_duration,
-            "after_date": docs_after_date,
             "after_price": docs_after_price,
         }
 
@@ -1330,8 +1727,6 @@ class FilterService:
         """
         Préfiltre les documents avant la recherche vectorielle.
 
-        Cette méthode constitue l'entrée principale utilisée par le pipeline RAG.
-
         Parameters
         ----------
         question : str
@@ -1339,7 +1734,7 @@ class FilterService:
         docs : list[Document]
             Documents candidats.
         default_city : str | None, default=None
-            Ville par défaut appliquée si nécessaire.
+            Ville par défaut éventuelle.
 
         Returns
         -------
@@ -1363,12 +1758,19 @@ class FilterService:
 
     def _doc_to_debug_row(self, doc: Document) -> dict[str, Any]:
         """
-        Convertit un document en ligne de debug légère.
+        Convertit un document en ligne légère pour le debug.
 
-        Cette structure permet d'inspecter facilement les documents
-        retenus sans réafficher tout le contenu complet.
+        Parameters
+        ----------
+        doc : Document
+            Document à sérialiser.
+
+        Returns
+        -------
+        dict[str, Any]
+            Représentation légère du document.
         """
-        md = doc.metadata or {}
+        md = self._metadata(doc)
         return {
             "title": md.get("title", ""),
             "city": md.get("city", ""),
@@ -1385,6 +1787,11 @@ class FilterService:
             "derived_event_terms": md.get("derived_event_terms", []),
             "derived_music_terms": md.get("derived_music_terms", []),
             "audience_terms": md.get("audience_terms", []),
+            "is_strong_cultural_candidate": md.get("is_strong_cultural_candidate", False),
+            "is_weak_cultural_candidate": md.get("is_weak_cultural_candidate", False),
+            "has_market_signal": md.get("has_market_signal", False),
+            "has_repair_signal": md.get("has_repair_signal", False),
+            "has_business_signal": md.get("has_business_signal", False),
             "url": md.get("source_url", "") or md.get("url", ""),
         }
 
@@ -1397,16 +1804,19 @@ class FilterService:
         """
         Préfiltre les documents et retourne des informations de debug détaillées.
 
-        Cette méthode est utile pour :
-        - comprendre pourquoi certains documents disparaissent
-        - inspecter les filtres extraits
-        - mesurer l'effet de chaque étape du pipeline
+        Parameters
+        ----------
+        question : str
+            Question utilisateur.
+        docs : list[Document]
+            Documents candidats.
+        default_city : str | None, default=None
+            Ville par défaut éventuelle.
 
         Returns
         -------
         dict[str, Any]
-            Résultat structuré contenant les filtres, les volumes intermédiaires
-            et la liste finale des documents retenus.
+            Structure détaillée de debug.
         """
         filters = self.extract_filters(
             question=question,
@@ -1420,12 +1830,12 @@ class FilterService:
             "filters": filters,
             "n_input_docs": len(pipeline["input"]),
             "n_after_city": len(pipeline["after_city"]),
+            "n_after_date": len(pipeline["after_date"]),
             "n_after_type": len(pipeline["after_type"]),
             "n_after_music": len(pipeline["after_music"]),
             "n_after_cultural": len(pipeline["after_cultural"]),
             "n_after_audience": len(pipeline["after_audience"]),
             "n_after_duration": len(pipeline["after_duration"]),
-            "n_after_date": len(pipeline["after_date"]),
             "n_after_price": len(final_docs),
             "docs": final_docs,
             "docs_debug": [self._doc_to_debug_row(doc) for doc in final_docs],

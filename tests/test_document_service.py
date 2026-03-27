@@ -29,7 +29,15 @@ def sample_event() -> dict:
         "agenda": {"uid": "agenda_123"},
         "title": {"fr": "Exposition peinture moderne"},
         "description": {"fr": "Une belle exposition d'art contemporain gratuite."},
-        "longDescription": {"fr": "Venez découvrir plusieurs artistes locaux."},
+        "longDescription": {
+            "fr": (
+                "Venez découvrir plusieurs artistes locaux, leurs univers visuels, "
+                "leurs techniques, leurs inspirations et les démarches créatives qui "
+                "structurent cette exposition. Cette présentation propose un parcours "
+                "riche, détaillé et commenté autour des œuvres, du lieu, des matériaux "
+                "utilisés et de la scène artistique contemporaine locale."
+            )
+        },
         "location": {
             "name": "Musée Fabre",
             "city": "Montpellier",
@@ -179,7 +187,7 @@ def test_compute_content_quality_counts_present_fields():
         music_genre="",
         canonical_event_type="exposition",
     )
-    assert score == 12
+    assert score == 11
 
 
 def test_build_cultural_tags_for_exhibition():
@@ -220,7 +228,7 @@ def test_build_search_text_contains_core_fields():
     assert "gratuit" in text.lower()
     assert "musique" in text.lower()
 
-    
+
 # -------------------------------------------------------------------------
 # Cohérence zone / scope
 # -------------------------------------------------------------------------

@@ -2,17 +2,19 @@
 Service documentaire pour le pipeline RAG OpenAgenda.
 
 Ce module est responsable de :
+
 - interroger l'API OpenAgenda
 - rechercher les agendas officiels pertinents pour une zone
 - récupérer les événements correspondant à une zone et à un scope
-- transformer chaque événement en Document LangChain
+- transformer chaque événement en `Document` LangChain
 - construire des métadonnées simples, cohérentes et fiables
 
 Les documents produits sont utilisés pour :
+
 - l'indexation vectorielle dans FAISS
-- le filtrage structuré dans filter_service
-- le ranking métier dans retrieval_service
-- la génération de réponse dans rag_service
+- le filtrage structuré dans `filter_service`
+- le ranking métier dans `retrieval_service`
+- la génération de réponse dans `rag_service`
 
 Ce module ne contient aucune logique de ranking ni de génération.
 
@@ -20,14 +22,24 @@ Philosophie documentaire
 ------------------------
 Deux représentations textuelles coexistent volontairement :
 
-- page_content :
+- `page_content` :
   texte court, structuré, lisible, destiné au contexte LLM
-- search_text :
+- `search_text` :
   texte plus riche, optimisé pour l'embedding, le matching lexical
   léger et le ranking métier
 
 Le contrôle de longueur est centralisé ici afin d'éviter de polluer
-rag_service avec des considérations de préparation documentaire.
+`rag_service` avec des considérations de préparation documentaire.
+
+Principes de conception
+-----------------------
+La construction documentaire suit quelques règles simples :
+
+- mieux vaut une métadonnée vide qu'une métadonnée fausse
+- la préparation du texte utile doit être centralisée ici
+- les signaux implicites doivent rester explicables
+- les contenus trop longs doivent être plafonnés
+- les faux positifs culturels doivent être limités autant que possible
 """
 
 from __future__ import annotations
@@ -49,24 +61,17 @@ LEX = LexicalService()
 # Paramètres documentaires
 # -------------------------------------------------------------------------
 
-# Description visible dans page_content :
-# courte, lisible, utile au LLM.
 MAX_PAGE_DESCRIPTION_CHARS = 320
-
-# Description enrichissant le search_text :
-# plus riche que celle du page_content, mais contrôlée.
 MAX_SEARCH_DESCRIPTION_CHARS = 420
-
-# Longue description :
-# utile pour enrichir l'embedding, mais à plafonner fortement.
 MAX_SEARCH_LONG_DESCRIPTION_CHARS = 520
-
-# Longueur maximale globale du search_text final.
 MAX_SEARCH_TEXT_CHARS = 900
+
+# Seuil minimal pour considérer qu'une longue description est réellement utile
+MIN_LONG_DESCRIPTION_CHARS = 120
 
 
 # -------------------------------------------------------------------------
-# Helpers de base
+# Helpers généraux
 # -------------------------------------------------------------------------
 
 def _nested_get(data: dict[str, Any], *keys: str) -> Any:
@@ -74,21 +79,24 @@ def _nested_get(data: dict[str, Any], *keys: str) -> Any:
     Accède en sécurité à des clés imbriquées d'un dictionnaire.
     """
     current: Any = data
+
     for key in keys:
         if not isinstance(current, dict):
             return None
         current = current.get(key)
+
     return current
 
 
 def _first_non_empty(*values: object) -> str:
     """
-    Retourne la première valeur non vide après extraction texte.
+    Retourne la première valeur textuelle non vide.
     """
     for value in values:
         text = LEX.extract_text(value)
         if text:
             return text
+
     return ""
 
 
@@ -109,7 +117,7 @@ def _extract_event_field(event: dict[str, Any], *paths: tuple[str, ...]) -> str:
 
 def _normalize_whitespace(value: object) -> str:
     """
-    Normalise les espaces et retours ligne d'un texte.
+    Normalise les espaces et les retours ligne d'un texte.
     """
     text = LEX.extract_text(value)
     if not text:
@@ -121,12 +129,6 @@ def _normalize_whitespace(value: object) -> str:
 def _truncate_text(value: object, max_chars: int) -> str:
     """
     Tronque un texte proprement sans couper brutalement au milieu d'un mot.
-
-    Règles :
-    - extraction texte via LexicalService
-    - normalisation des espaces
-    - coupe à max_chars si nécessaire
-    - essaie de couper sur le dernier espace disponible
     """
     text = _normalize_whitespace(value)
     if not text:
@@ -157,11 +159,6 @@ def _join_non_empty(parts: list[str], sep: str = " ") -> str:
 def _parse_iso_date(value: object) -> datetime | None:
     """
     Parse une date ISO.
-
-    Supporte par exemple :
-    - 2025-09-21
-    - 2025-09-21T18:30:00
-    - 2025-09-21T18:30:00Z
     """
     raw = LEX.extract_text(value)
     if not raw:
@@ -180,7 +177,7 @@ def _parse_iso_date(value: object) -> datetime | None:
 
 def _normalize_iso_day(value: object) -> str:
     """
-    Ramène une date potentielle au format YYYY-MM-DD.
+    Ramène une date potentielle au format `YYYY-MM-DD`.
     """
     parsed = _parse_iso_date(value)
     if parsed is None:
@@ -237,7 +234,7 @@ def _compute_duration_days(first_date: str, last_date: str) -> int | None:
 
 
 # -------------------------------------------------------------------------
-# Qualité / enrichissement
+# Qualité documentaire et enrichissement
 # -------------------------------------------------------------------------
 
 def _compute_content_quality(
@@ -258,13 +255,11 @@ def _compute_content_quality(
 ) -> int:
     """
     Calcule un score simple de qualité documentaire.
-
-    Ce score reste volontairement interprétable.
     """
     score = 0
     score += int(bool(title))
     score += int(bool(description))
-    score += int(bool(long_description))
+    score += int(len(long_description) >= MIN_LONG_DESCRIPTION_CHARS)
     score += int(bool(location_name))
     score += int(bool(city))
     score += int(bool(region))
@@ -285,32 +280,78 @@ def _build_cultural_tags(
     derived_terms: list[str],
 ) -> list[str]:
     """
-    Déduit quelques tags culturels simples pour enrichir le search_text.
+    Déduit quelques tags culturels simples pour enrichir le `search_text`.
     """
     tags: set[str] = set()
 
-    if canonical_event_type in LEX.CULTURAL_EVENT_TYPES:
+    if canonical_event_type in {
+        "exposition",
+        "concert",
+        "festival",
+        "projection",
+        "spectacle",
+        "conte",
+        "lecture",
+    }:
         tags.update(["culture", "culturel", "evenement culturel"])
 
     if any(term in derived_terms for term in ["exposition", "expo", "vernissage"]):
         tags.update(["art", "artistique", "exposition"])
 
-    if any(term in derived_terms for term in ["concert", "live"]):
+    if any(term in derived_terms for term in ["concert"]):
         tags.update(["musique", "musical", "concert"])
 
     if any(term in derived_terms for term in ["projection", "film", "cinema"]):
         tags.update(["cinema", "projection"])
 
-    if any(term in derived_terms for term in ["conference", "conférence", "rencontre", "debat"]):
-        tags.update(["conference", "rencontre"])
+    if any(term in derived_terms for term in ["spectacle", "theatre"]):
+        tags.update(["spectacle", "scene"])
 
-    if any(term in derived_terms for term in ["visite"]):
-        tags.update(["visite", "patrimoine"])
-
-    if any(term in derived_terms for term in ["atelier"]):
-        tags.update(["atelier"])
+    if any(term in derived_terms for term in ["conte", "lecture"]):
+        tags.update(["lecture", "oralite"])
 
     return sorted(tags)
+
+
+def _build_implicit_relevance_flags(
+    *,
+    title: str,
+    description: str,
+    long_description: str,
+    canonical_event_type: str,
+    derived_terms: list[str],
+    lexical_profile: dict[str, Any],
+) -> dict[str, bool]:
+    """
+    Déduit quelques drapeaux implicites de pertinence métier.
+    """
+    support_text = LEX.normalize_text(
+        f"{title} {description} {long_description} {' '.join(derived_terms)} {canonical_event_type}"
+    )
+
+    strong_cultural_types = {
+        "exposition",
+        "concert",
+        "festival",
+        "projection",
+        "spectacle",
+        "conte",
+        "lecture",
+    }
+    weak_cultural_types = {"atelier", "conference", "visite"}
+
+    return {
+        "is_strong_cultural_candidate": canonical_event_type in strong_cultural_types,
+        "is_weak_cultural_candidate": canonical_event_type in weak_cultural_types,
+        "has_market_signal": bool(lexical_profile.get("has_market_signal", False)),
+        "has_repair_signal": bool(lexical_profile.get("has_repair_signal", False)),
+        "has_religious_signal": bool(lexical_profile.get("has_religious_signal", False)),
+        "has_business_signal": bool(lexical_profile.get("has_business_signal", False)),
+        "has_strong_cultural_terms": LEX.contains_any_term(
+            support_text,
+            LEX.STRONG_CULTURAL_TERMS,
+        ),
+    }
 
 
 def _build_page_content(
@@ -329,11 +370,6 @@ def _build_page_content(
 ) -> str:
     """
     Construit la fiche courte destinée au LLM.
-
-    Objectifs :
-    - rester compacte
-    - garder les informations discriminantes
-    - éviter les descriptions trop longues
     """
     page_lines = [
         f"Titre : {title}",
@@ -387,37 +423,29 @@ def _build_search_text(
     max_chars: int = MAX_SEARCH_TEXT_CHARS,
 ) -> str:
     """
-    Construit le texte riche destiné à :
-    - l'embedding
-    - le matching lexical léger
-    - le ranking métier
-
-    Principes :
-    - ordre des champs pensé pour maximiser le signal utile
-    - descriptions déjà tronquées en amont
-    - nettoyage final via LexicalService
-    - limite finale globale pour éviter les textes trop longs
+    Construit le texte riche destiné à l'embedding, au matching lexical léger
+    et au ranking métier.
     """
     parts = [
         title,
         canonical_event_type,
-        event_type,
         canonical_music_genre,
+        event_type,
         location_name,
         city,
         region,
         first_date,
         last_date,
-        price_info,
-        access_label,
-        duration_label,
         description_search,
         long_description_search,
         " ".join(title_keywords),
         " ".join(derived_terms),
         " ".join(derived_music_terms),
-        " ".join(audience_terms),
         " ".join(cultural_tags),
+        " ".join(audience_terms),
+        price_info,
+        access_label,
+        duration_label,
     ]
 
     text = LEX.clean_text(_join_non_empty(parts, sep=" "))
@@ -442,6 +470,12 @@ def _build_search_text(
 def _matches_zone_scope(doc: Document, zone: str, scope: str) -> bool:
     """
     Vérifie qu'un document correspond réellement à la zone demandée.
+
+    Pour le scope `city`, la ville documentaire doit correspondre
+    à la zone demandée une fois normalisée.
+
+    La logique est légèrement souple pour tolérer certaines variantes
+    documentaires simples.
     """
     zone_norm = LEX.normalize_text(zone)
     md = doc.metadata or {}
@@ -450,7 +484,12 @@ def _matches_zone_scope(doc: Document, zone: str, scope: str) -> bool:
         city_norm = LEX.normalize_text(md.get("city", ""))
         if not city_norm:
             return False
-        return city_norm == zone_norm
+
+        return (
+            city_norm == zone_norm
+            or zone_norm in city_norm
+            or city_norm in zone_norm
+        )
 
     return True
 
@@ -464,7 +503,7 @@ def get_default_date_window(
     days_forward: int = 365,
 ) -> tuple[str, str]:
     """
-    Calcule la fenêtre temporelle utilisée pour récupérer les événements OpenAgenda.
+    Calcule la fenêtre temporelle utilisée pour récupérer les événements.
     """
     today = date.today()
     date_from = (today - timedelta(days=days_back)).isoformat()
@@ -474,7 +513,7 @@ def get_default_date_window(
 
 def search_agendas_for_zone(zone: str, size: int = 30) -> list[dict[str, Any]]:
     """
-    Recherche des agendas OpenAgenda officiels susceptibles de concerner une zone.
+    Recherche les agendas OpenAgenda officiels susceptibles de concerner une zone.
     """
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante")
@@ -504,8 +543,7 @@ def fetch_openagenda_events(
     max_pages: int = 10,
 ) -> list[dict[str, Any]]:
     """
-    Récupère les événements d'un agenda OpenAgenda en appliquant un filtrage
-    par zone et par scope.
+    Récupère les événements d'un agenda OpenAgenda.
     """
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante")
@@ -551,33 +589,13 @@ def fetch_openagenda_events(
 
 def build_event_document(event: dict[str, Any]) -> Document:
     """
-    Transforme un événement OpenAgenda en Document LangChain.
-
-    Les métadonnées produites servent :
-    - à l'affichage
-    - au filtrage structuré
-    - au ranking métier
-    - au debug
-
-    Philosophie :
-    - enrichir utilement
-    - rester prudent sur les champs canoniques
-    - mieux vaut un champ vide qu'une mauvaise classification
-    - centraliser ici la préparation textuelle pour ne pas charger rag_service
+    Transforme un événement OpenAgenda en `Document` LangChain.
     """
     event_uid = _extract_event_field(event, ("uid",))
     agenda_uid = _extract_event_field(event, ("agenda", "uid"))
 
-    title = _extract_event_field(
-        event,
-        ("title",),
-        ("title", "fr"),
-    )
-    description = _extract_event_field(
-        event,
-        ("description",),
-        ("description", "fr"),
-    )
+    title = _extract_event_field(event, ("title",), ("title", "fr"))
+    description = _extract_event_field(event, ("description",), ("description", "fr"))
     long_description = _extract_event_field(
         event,
         ("longDescription",),
@@ -589,32 +607,14 @@ def build_event_document(event: dict[str, Any]) -> Document:
         ("location_name",),
         ("location", "name"),
     )
-
-    city = _extract_event_field(
-        event,
-        ("city",),
-        ("location", "city"),
-    )
-
-    region = _extract_event_field(
-        event,
-        ("region",),
-        ("location", "region"),
-    )
+    city = _extract_event_field(event, ("city",), ("location", "city"))
+    region = _extract_event_field(event, ("region",), ("location", "region"))
 
     first_date = _normalize_iso_day(
-        _extract_event_field(
-            event,
-            ("firstDate",),
-            ("first_date",),
-        )
+        _extract_event_field(event, ("firstDate",), ("first_date",))
     )
     last_date = _normalize_iso_day(
-        _extract_event_field(
-            event,
-            ("lastDate",),
-            ("last_date",),
-        )
+        _extract_event_field(event, ("lastDate",), ("last_date",))
     )
 
     event_type = _extract_event_field(
@@ -629,10 +629,6 @@ def build_event_document(event: dict[str, Any]) -> Document:
         ("canonicalUrl",),
         ("url",),
     )
-
-    # ------------------------------------------------------------------
-    # Préparation textuelle brute
-    # ------------------------------------------------------------------
 
     title = _normalize_whitespace(title)
     description = _normalize_whitespace(description)
@@ -652,19 +648,19 @@ def build_event_document(event: dict[str, Any]) -> Document:
         event.get("attendanceMode"),
     )
 
-    profile = LEX.build_document_lexical_profile(
+    lexical_profile = LEX.build_document_lexical_profile(
         title=title,
         description=description,
         long_description=long_description,
         event_type=event_type,
     )
 
-    title_keywords = profile["keywords_title"]
-    derived_terms = profile["derived_event_terms"]
-    derived_music_terms = profile["derived_music_terms"]
-    audience_terms = profile["audience_terms"]
-    canonical_event_type = profile["canonical_event_type"]
-    canonical_music_genre = profile["music_genre"]
+    title_keywords = lexical_profile["keywords_title"]
+    derived_terms = lexical_profile["derived_event_terms"]
+    derived_music_terms = lexical_profile["derived_music_terms"]
+    audience_terms = lexical_profile["audience_terms"]
+    canonical_event_type = lexical_profile["canonical_event_type"]
+    canonical_music_genre = lexical_profile["music_genre"]
 
     # ------------------------------------------------------------------
     # Garde-fou musical
@@ -674,26 +670,28 @@ def build_event_document(event: dict[str, Any]) -> Document:
         support_text = LEX.normalize_text(
             f"{title} {description} {long_description} {event_type} {canonical_event_type}"
         )
+
+        musical_terms = [
+            "concert",
+            "live",
+            "dj set",
+            "showcase",
+            "musique",
+            "musical",
+            "musicien",
+            "groupe",
+            "chanteur",
+            "duo",
+            "trio",
+            "scene",
+            "scène",
+        ]
+
+        musical_hits = LEX.count_matching_terms(support_text, musical_terms)
+
         has_strong_musical_context = (
             canonical_event_type in LEX.MUSICAL_EVENT_TYPES
-            or LEX.contains_any_term(
-                support_text,
-                [
-                    "concert",
-                    "live",
-                    "dj set",
-                    "showcase",
-                    "musique",
-                    "musical",
-                    "musicien",
-                    "groupe",
-                    "chanteur",
-                    "duo",
-                    "trio",
-                    "scene",
-                    "scène",
-                ],
-            )
+            or musical_hits >= 2
         )
 
         if not has_strong_musical_context:
@@ -711,11 +709,20 @@ def build_event_document(event: dict[str, Any]) -> Document:
         access_label = "tarification inconnue"
 
     is_single_day = duration_days == 1 if duration_days is not None else None
-    has_long_description = bool(long_description)
+    has_long_description = len(long_description) >= MIN_LONG_DESCRIPTION_CHARS
 
     cultural_tags = _build_cultural_tags(
         canonical_event_type=canonical_event_type,
         derived_terms=derived_terms,
+    )
+
+    implicit_flags = _build_implicit_relevance_flags(
+        title=title,
+        description=description,
+        long_description=long_description,
+        canonical_event_type=canonical_event_type,
+        derived_terms=derived_terms,
+        lexical_profile=lexical_profile,
     )
 
     content_quality = _compute_content_quality(
@@ -734,10 +741,6 @@ def build_event_document(event: dict[str, Any]) -> Document:
         canonical_event_type=canonical_event_type,
     )
 
-    # ------------------------------------------------------------------
-    # Versions textuelles contrôlées
-    # ------------------------------------------------------------------
-
     description_short = _truncate_text(description, MAX_PAGE_DESCRIPTION_CHARS)
     description_search = _truncate_text(description, MAX_SEARCH_DESCRIPTION_CHARS)
     long_description_search = _truncate_text(
@@ -745,7 +748,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
         MAX_SEARCH_LONG_DESCRIPTION_CHARS,
     )
 
-    event_type_label = canonical_event_type or event_type
+    event_type_label = canonical_event_type or event_type or "type non precise"
 
     page_content = _build_page_content(
         title=title,
@@ -816,13 +819,15 @@ def build_event_document(event: dict[str, Any]) -> Document:
         "location_name_norm": LEX.normalize_text(location_name),
         "city_norm": LEX.normalize_text(city),
         "region_norm": LEX.normalize_text(region),
-        "event_type_norm": LEX.normalize_text(event_type_label),
+        "event_type_norm": LEX.normalize_text(event_type),
+        "canonical_event_type_norm": LEX.normalize_text(canonical_event_type),
         "music_genre_norm": LEX.normalize_text(canonical_music_genre),
         "duration_label": duration_label,
         "duration_days": duration_days,
         "is_single_day": is_single_day,
         "has_long_description": has_long_description,
         "content_quality": content_quality,
+        **implicit_flags,
     }
 
     return Document(page_content=page_content, metadata=metadata)
@@ -834,13 +839,6 @@ def load_documents(
 ) -> list[Document]:
     """
     Charge les documents OpenAgenda prêts à être indexés.
-
-    Étapes :
-    - recherche des agendas officiels liés à la zone
-    - récupération des événements
-    - transformation en Documents LangChain
-    - déduplication par event_uid
-    - contrôle final zone / scope
     """
     agendas = search_agendas_for_zone(zone)
 

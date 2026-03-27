@@ -4,11 +4,12 @@ Service lexical partagé pour le pipeline RAG OpenAgenda.
 Ce module centralise les opérations lexicales réutilisables dans
 plusieurs services applicatifs, notamment :
 
-- document_service
-- filter_service
-- retrieval_service
+- `document_service`
+- `filter_service`
+- `retrieval_service`
 
 Il permet de :
+
 - normaliser les textes
 - extraire des tokens et des mots-clés
 - détecter des types d'événements
@@ -16,12 +17,26 @@ Il permet de :
 - détecter quelques signaux métier simples dans une question
 - dériver des termes métier utiles pour l'indexation et le retrieval
 - fournir des helpers communs de matching lexical
+- détecter quelques signaux négatifs utiles pour éviter certains faux positifs
 
 Ce service ne gère pas :
+
 - le parsing des dates
 - le scoring métier
 - la recherche vectorielle
 - la génération de réponse
+
+Philosophie
+-----------
+Le service lexical doit rester :
+
+- cohérent entre documents et questions
+- explicable
+- prudent
+- peu coûteux à exécuter
+- simple à maintenir
+
+Il vaut mieux renvoyer un signal vide qu'un faux signal métier.
 """
 
 from __future__ import annotations
@@ -35,11 +50,15 @@ class LexicalService:
     """
     Service lexical partagé.
 
-    Philosophie :
-    - fournir une logique de normalisation cohérente pour tout le pipeline
-    - limiter les divergences entre documents et questions
-    - rester explicable et simple à maintenir
-    - préférer des règles prudentes à des déductions trop agressives
+    Cette classe fournit un ensemble d'utilitaires de normalisation,
+    de matching lexical et de détection de signaux métier simples
+    pour l'ensemble du pipeline RAG.
+
+    Le service est volontairement conservateur :
+
+    - il privilégie la robustesse
+    - il limite les déductions agressives
+    - il sert de base commune à plusieurs composants
     """
 
     STOPWORDS = {
@@ -91,13 +110,21 @@ class LexicalService:
         "culturels",
         "culturelle",
         "culturelles",
-        "des",
         "ces",
         "cet",
         "cette",
         "aujourd",
         "hui",
         "demain",
+        "week",
+        "end",
+        "weekend",
+        "weekends",
+        "mois",
+        "annee",
+        "année",
+        "jour",
+        "jours",
     }
 
     EVENT_TYPE_TERMS = {
@@ -125,7 +152,6 @@ class LexicalService:
             "dj sets",
             "performance musicale",
             "performances musicales",
-            "performance musicale live",
             "session live",
             "sessions live",
             "soiree concert",
@@ -154,20 +180,12 @@ class LexicalService:
             "conferences",
             "conférence",
             "conférences",
-            "rencontre",
-            "rencontres",
             "debat",
             "debats",
             "débat",
             "débats",
             "table ronde",
             "tables rondes",
-            "discussion",
-            "discussions",
-            "entretien",
-            "entretiens",
-            "conversation",
-            "conversations",
             "masterclass",
         ],
         "atelier": [
@@ -177,10 +195,6 @@ class LexicalService:
             "initiations",
             "workshop",
             "workshops",
-            "stage",
-            "stages",
-            "laboratoire",
-            "laboratoires",
             "atelier participatif",
             "ateliers participatifs",
         ],
@@ -251,8 +265,6 @@ class LexicalService:
             "representations",
             "représentation",
             "représentations",
-            "performance",
-            "performances",
             "one man show",
             "one man shows",
             "one-man-show",
@@ -324,9 +336,6 @@ class LexicalService:
         "concert",
         "festival",
         "projection",
-        "conference",
-        "visite",
-        "atelier",
         "spectacle",
         "conte",
         "lecture",
@@ -338,12 +347,7 @@ class LexicalService:
         "spectacle",
     }
 
-    CULTURAL_TERMS = [
-        "culture",
-        "culturel",
-        "culturelle",
-        "culturels",
-        "culturelles",
+    STRONG_CULTURAL_TERMS = [
         "exposition",
         "expo",
         "vernissage",
@@ -352,41 +356,180 @@ class LexicalService:
         "projection",
         "cinema",
         "cinéma",
-        "conference",
-        "conférence",
-        "debat",
-        "débat",
-        "rencontre",
-        "visite",
-        "atelier",
         "spectacle",
         "theatre",
         "théâtre",
         "conte",
         "lecture",
-        "patrimoine",
+        "danse",
+        "poesie",
+        "poésie",
         "musee",
         "musée",
         "galerie",
-        "art",
-        "photo",
-        "photographie",
-        "architecture",
-        "que faire",
-        "sortie culturelle",
-        "sorties culturelles",
     ]
 
-    WEAK_CULTURAL_TERMS = [
+    MEDIUM_CULTURAL_TERMS = [
+        "conference",
+        "conférence",
+        "debat",
+        "débat",
+        "visite",
+        "atelier",
+        "patrimoine",
+        "architecture",
+        "photographie",
+        "photo",
+    ]
+
+    # Attention :
+    # ces termes faibles ne doivent PAS activer un filtre culturel fort.
+    WEAK_ACTIVITY_TERMS = [
         "que faire",
+        "quoi faire",
         "sortie",
         "sorties",
-        "culture",
-        "culturel",
-        "culturelle",
-        "culturels",
-        "culturelles",
+        "activite",
+        "activité",
+        "activites",
+        "activités",
+        "agenda",
+        "programme",
     ]
+
+    MARKET_TERMS = [
+        "braderie",
+        "destockage",
+        "déstockage",
+        "brocante",
+        "vide grenier",
+        "vide-grenier",
+        "market",
+        "pop up market",
+        "pop-up market",
+        "vinyl pop up",
+        "vinyl pop-up",
+    ]
+
+    REPAIR_TERMS = [
+        "repair cafe",
+        "repair café",
+        "reparation",
+        "réparation",
+        "reparer",
+        "réparer",
+        "atelier de reparation",
+        "atelier de réparation",
+    ]
+
+    RELIGIOUS_TERMS = [
+        "messe",
+        "veillee",
+        "veillée",
+        "priere",
+        "prière",
+        "prieure",
+        "prieuré",
+        "saint",
+        "paroisse",
+        "patronage",
+    ]
+
+    BUSINESS_TERMS = [
+        "franchise",
+        "networking",
+        "investisseur",
+        "entrepreneur",
+        "concours",
+        "business",
+        "salon professionnel",
+    ]
+
+    KNOWN_CITY_TERMS = [
+        "montpellier",
+        "paris",
+        "sete",
+        "sète",
+        "toulouse",
+        "lyon",
+        "marseille",
+        "bordeaux",
+        "lille",
+        "nantes",
+    ]
+
+    def __init__(self) -> None:
+        """
+        Initialise le service lexical.
+
+        Les tables lexicales normalisées sont pré-calculées une fois afin de :
+
+        - réduire les appels répétés à `normalize_text`
+        - accélérer les matching fréquents
+        - garder une logique homogène dans tout le pipeline
+        """
+        self._event_type_terms_norm = self._normalize_term_mapping(self.EVENT_TYPE_TERMS)
+        self._music_genre_terms_norm = self._normalize_term_mapping(self.MUSIC_GENRE_TERMS)
+        self._audience_terms_norm = self._normalize_term_mapping(self.AUDIENCE_TERMS)
+
+        self._free_markers_norm = self._normalize_terms(self.FREE_MARKERS)
+        self._paid_markers_norm = self._normalize_terms(self.PAID_MARKERS)
+
+        self._strong_cultural_terms_norm = self._normalize_terms(self.STRONG_CULTURAL_TERMS)
+        self._medium_cultural_terms_norm = self._normalize_terms(self.MEDIUM_CULTURAL_TERMS)
+        self._weak_activity_terms_norm = self._normalize_terms(self.WEAK_ACTIVITY_TERMS)
+
+        self._market_terms_norm = self._normalize_terms(self.MARKET_TERMS)
+        self._repair_terms_norm = self._normalize_terms(self.REPAIR_TERMS)
+        self._religious_terms_norm = self._normalize_terms(self.RELIGIOUS_TERMS)
+        self._business_terms_norm = self._normalize_terms(self.BUSINESS_TERMS)
+        self._known_city_terms_norm = self._normalize_terms(self.KNOWN_CITY_TERMS)
+
+    # ------------------------------------------------------------------
+    # Utilitaires internes de normalisation
+    # ------------------------------------------------------------------
+
+    def _normalize_terms(self, terms: list[str] | set[str] | tuple[str, ...]) -> list[str]:
+        """
+        Normalise une collection de termes et supprime les doublons.
+
+        Parameters
+        ----------
+        terms : list[str] | set[str] | tuple[str, ...]
+            Liste brute de termes.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de termes normalisés non vides.
+        """
+        normalized = {
+            self.normalize_text(term)
+            for term in terms
+            if self.normalize_text(term)
+        }
+        return sorted(normalized)
+
+    def _normalize_term_mapping(self, mapping: dict[str, list[str]]) -> dict[str, list[str]]:
+        """
+        Normalise les variantes lexicales d'un dictionnaire canonique.
+
+        Parameters
+        ----------
+        mapping : dict[str, list[str]]
+            Dictionnaire de type canonique -> variantes textuelles.
+
+        Returns
+        -------
+        dict[str, list[str]]
+            Dictionnaire équivalent avec variantes normalisées.
+        """
+        normalized_mapping: dict[str, list[str]] = {}
+
+        for key, values in mapping.items():
+            normalized_mapping[key] = self._normalize_terms(values)
+
+        return normalized_mapping
 
     # ------------------------------------------------------------------
     # Utilitaires texte de base
@@ -395,6 +538,16 @@ class LexicalService:
     def safe(self, value: object) -> str:
         """
         Convertit une valeur potentiellement nulle en chaîne.
+
+        Parameters
+        ----------
+        value : object
+            Valeur arbitraire.
+
+        Returns
+        -------
+        str
+            Chaîne vide si la valeur est nulle, sinon conversion en texte.
         """
         return "" if value is None else str(value)
 
@@ -403,9 +556,20 @@ class LexicalService:
         Nettoie un texte sans en modifier le sens métier.
 
         Le nettoyage applique :
+
         - suppression des retours ligne
         - suppression des tabulations
         - réduction des espaces multiples
+
+        Parameters
+        ----------
+        value : object
+            Valeur textuelle brute.
+
+        Returns
+        -------
+        str
+            Texte nettoyé.
         """
         text = self.safe(value)
         text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
@@ -417,9 +581,26 @@ class LexicalService:
         Extrait un texte propre depuis une valeur arbitraire.
 
         La valeur peut être :
+
         - une chaîne simple
         - un dictionnaire multilingue
         - toute autre valeur convertible en texte
+
+        En cas de dictionnaire, la priorité est donnée à :
+
+        1. `fr`
+        2. `en`
+        3. premier champ non vide
+
+        Parameters
+        ----------
+        value : object
+            Valeur source.
+
+        Returns
+        -------
+        str
+            Texte extrait.
         """
         if isinstance(value, dict):
             for key in ("fr", "en"):
@@ -440,10 +621,21 @@ class LexicalService:
         Normalise un texte pour les comparaisons lexicales simples.
 
         Transformations appliquées :
+
         - minuscules
         - suppression des accents
         - suppression de la ponctuation non utile
         - compactage des espaces
+
+        Parameters
+        ----------
+        value : object
+            Valeur source.
+
+        Returns
+        -------
+        str
+            Texte normalisé.
         """
         text = self.extract_text(value).lower()
         text = unicodedata.normalize("NFKD", text)
@@ -455,6 +647,16 @@ class LexicalService:
     def tokenize_text(self, value: object) -> list[str]:
         """
         Découpe un texte normalisé en tokens simples.
+
+        Parameters
+        ----------
+        value : object
+            Texte source.
+
+        Returns
+        -------
+        list[str]
+            Liste de tokens alphanumériques de longueur >= 3.
         """
         text = self.normalize_text(value)
         return re.findall(r"\b[a-z0-9]{3,}\b", text)
@@ -462,6 +664,16 @@ class LexicalService:
     def join_texts(self, *values: object) -> str:
         """
         Concatène proprement plusieurs morceaux de texte.
+
+        Parameters
+        ----------
+        *values : object
+            Morceaux de texte à concaténer.
+
+        Returns
+        -------
+        str
+            Texte final nettoyé.
         """
         return self.clean_text(
             " ".join(self.extract_text(value) for value in values if value)
@@ -471,48 +683,92 @@ class LexicalService:
     # Matching lexical simple
     # ------------------------------------------------------------------
 
-    def contains_term(self, text: str, term: str) -> bool:
+    def contains_term(self, text: object, term: object) -> bool:
         """
         Vérifie la présence d'un terme complet dans un texte normalisé.
+
+        Cette fonction fonctionne pour :
+
+        - un mot simple
+        - une expression multi-mots
+
+        Parameters
+        ----------
+        text : object
+            Texte de recherche.
+        term : object
+            Terme recherché.
+
+        Returns
+        -------
+        bool
+            True si le terme est présent, sinon False.
         """
         normalized_text = self.normalize_text(text)
         normalized_term = self.normalize_text(term)
 
-        if not normalized_term:
+        if not normalized_text or not normalized_term:
             return False
 
-        return re.search(rf"\b{re.escape(normalized_term)}\b", normalized_text) is not None
+        return re.search(
+            rf"\b{re.escape(normalized_term)}\b",
+            normalized_text,
+        ) is not None
 
-    def contains_any_term(self, text: str, terms: list[str]) -> bool:
+    def contains_any_term(self, text: object, terms: list[str]) -> bool:
         """
-        Vérifie si au moins un terme complet est présent dans un texte normalisé.
+        Vérifie si au moins un terme complet est présent dans un texte.
+
+        Parameters
+        ----------
+        text : object
+            Texte inspecté.
+        terms : list[str]
+            Liste de termes candidats.
+
+        Returns
+        -------
+        bool
+            True si au moins un terme est trouvé.
         """
         normalized_text = self.normalize_text(text)
-        normalized_terms = [
-            self.normalize_text(term)
-            for term in terms
-            if self.normalize_text(term)
-        ]
+        if not normalized_text or not terms:
+            return False
+
+        normalized_terms = self._normalize_terms(terms)
 
         for term in normalized_terms:
-            if self.contains_term(normalized_text, term):
+            if re.search(rf"\b{re.escape(term)}\b", normalized_text):
                 return True
 
         return False
 
-    def count_matching_terms(self, text: str, terms: list[str]) -> int:
+    def count_matching_terms(self, text: object, terms: list[str]) -> int:
         """
         Compte combien de termes distincts sont présents dans un texte.
+
+        Parameters
+        ----------
+        text : object
+            Texte inspecté.
+        terms : list[str]
+            Liste de termes candidats.
+
+        Returns
+        -------
+        int
+            Nombre de termes distincts trouvés.
         """
         normalized_text = self.normalize_text(text)
-        normalized_terms = {
-            self.normalize_text(term)
-            for term in terms
-            if self.normalize_text(term)
-        }
+        if not normalized_text or not terms:
+            return 0
+
+        normalized_terms = self._normalize_terms(terms)
+
         return sum(
-            1 for term in normalized_terms
-            if self.contains_term(normalized_text, term)
+            1
+            for term in normalized_terms
+            if re.search(rf"\b{re.escape(term)}\b", normalized_text)
         )
 
     # ------------------------------------------------------------------
@@ -528,6 +784,26 @@ class LexicalService:
     ) -> list[str]:
         """
         Extrait des mots-clés simples et uniques depuis un texte.
+
+        Règles appliquées :
+
+        - longueur minimale configurable
+        - suppression optionnelle des stopwords
+        - exclusion des années au format `20xx`
+
+        Parameters
+        ----------
+        text : object
+            Texte source.
+        min_len : int, default=3
+            Longueur minimale d'un mot-clé.
+        remove_stopwords : bool, default=True
+            Indique si les stopwords doivent être supprimés.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de mots-clés.
         """
         tokens = self.tokenize_text(text)
 
@@ -535,6 +811,7 @@ class LexicalService:
             token
             for token in tokens
             if len(token) >= min_len
+            and not re.fullmatch(r"20\d{2}", token)
             and (not remove_stopwords or token not in self.STOPWORDS)
         }
 
@@ -543,6 +820,16 @@ class LexicalService:
     def extract_title_keywords(self, title: str) -> list[str]:
         """
         Extrait des mots-clés simples depuis un titre.
+
+        Parameters
+        ----------
+        title : str
+            Titre documentaire.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de mots-clés du titre.
         """
         return self.extract_keywords(title, min_len=3, remove_stopwords=True)
 
@@ -554,12 +841,24 @@ class LexicalService:
         """
         Détecte un type d'événement explicite dans un texte.
 
-        Cette fonction est utile surtout pour analyser les questions
-        utilisateur. Elle reste volontairement prudente.
+        Cette fonction sert surtout à analyser une question utilisateur
+        ou un texte documentaire court.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        str | None
+            Type canonique détecté, ou None.
         """
         text_norm = self.normalize_text(text)
+        if not text_norm:
+            return None
 
-        for canonical_type, variants in self.EVENT_TYPE_TERMS.items():
+        for canonical_type, variants in self._event_type_terms_norm.items():
             if self.contains_any_term(text_norm, variants):
                 return canonical_type
 
@@ -569,12 +868,21 @@ class LexicalService:
         """
         Détecte un genre musical explicite dans un texte.
 
-        Cette fonction est utile surtout pour analyser les questions
-        utilisateur. Elle reste volontairement prudente.
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        str | None
+            Genre canonique détecté, ou None.
         """
         text_norm = self.normalize_text(text)
+        if not text_norm:
+            return None
 
-        for canonical_genre, variants in self.MUSIC_GENRE_TERMS.items():
+        for canonical_genre, variants in self._music_genre_terms_norm.items():
             if self.contains_any_term(text_norm, variants):
                 return canonical_genre
 
@@ -583,18 +891,30 @@ class LexicalService:
     def extract_audience_terms(self, text: object) -> list[str]:
         """
         Extrait des signaux simples de public cible.
+
+        Important :
+        cette extraction ne doit servir au filtrage de question
+        que si le public est explicitement formulé dans la question.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de signaux de public détectés.
         """
         text_norm = self.normalize_text(text)
+        if not text_norm:
+            return []
+
         terms: set[str] = set()
 
-        for canonical_audience, variants in self.AUDIENCE_TERMS.items():
+        for canonical_audience, variants in self._audience_terms_norm.items():
             if self.contains_any_term(text_norm, variants):
                 terms.add(canonical_audience)
-                terms.update(
-                    self.normalize_text(variant)
-                    for variant in variants
-                    if self.contains_term(text_norm, variant)
-                )
 
         return sorted(terms)
 
@@ -603,15 +923,29 @@ class LexicalService:
         Déduit une information simple de tarification à partir de plusieurs textes.
 
         Retourne :
-        - ("gratuit", True)
-        - ("payant", False)
-        - ("inconnu", None)
+
+        - `("gratuit", True)`
+        - `("payant", False)`
+        - `("inconnu", None)`
+
+        Parameters
+        ----------
+        *values : object
+            Champs textuels à agréger.
+
+        Returns
+        -------
+        tuple[str, bool | None]
+            Libellé tarifaire et booléen de gratuité.
         """
         text = self.join_texts(*values)
         text_norm = self.normalize_text(text)
 
-        has_free = any(marker in text_norm for marker in self.FREE_MARKERS)
-        has_paid = any(marker in text_norm for marker in self.PAID_MARKERS)
+        if not text_norm:
+            return "inconnu", None
+
+        has_free = self.contains_any_term(text_norm, self._free_markers_norm)
+        has_paid = self.contains_any_term(text_norm, self._paid_markers_norm)
 
         if has_free and not has_paid:
             return "gratuit", True
@@ -624,63 +958,179 @@ class LexicalService:
 
         return "inconnu", None
 
+    def has_market_signal(self, text: object) -> bool:
+        """
+        Indique si un texte contient un signal de marché ou de braderie.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        bool
+            True si un signal de marché est détecté.
+        """
+        return self.contains_any_term(text, self._market_terms_norm)
+
+    def has_repair_signal(self, text: object) -> bool:
+        """
+        Indique si un texte contient un signal de réparation.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        bool
+            True si un signal de réparation est détecté.
+        """
+        return self.contains_any_term(text, self._repair_terms_norm)
+
+    def has_religious_signal(self, text: object) -> bool:
+        """
+        Indique si un texte contient un signal religieux.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        bool
+            True si un signal religieux est détecté.
+        """
+        return self.contains_any_term(text, self._religious_terms_norm)
+
+    def has_business_signal(self, text: object) -> bool:
+        """
+        Indique si un texte contient un signal business ou événementiel non culturel.
+
+        Parameters
+        ----------
+        text : object
+            Texte à analyser.
+
+        Returns
+        -------
+        bool
+            True si un signal business est détecté.
+        """
+        return self.contains_any_term(text, self._business_terms_norm)
+
     def is_cultural_query(self, text: object) -> bool:
         """
-        Détecte si une question semble viser explicitement un besoin culturel.
+        Détecte si une question contient une contrainte culturelle explicite.
 
-        Logique prudente :
-        - vrai si la question contient un type culturel explicite
-        - vrai si elle contient un vocabulaire culturel fort
-        - vrai si elle contient "que faire" + au moins un signal culturel
-        - faux sinon
+        Règle importante :
+        ce booléen ne doit être activé que si la dimension culturelle
+        est explicitement présente dans la question.
+
+        Active `True` si la question contient par exemple :
+        - un type culturel explicite : exposition, concert, festival...
+        - l'expression "événement culturel" / "sortie culturelle"
+        - un vocabulaire culturel fort explicite
+
+        N'active PAS `True` pour :
+        - "que faire"
+        - "quoi faire"
+        - "sorties"
+        - formulations larges d'exploration sans contrainte culturelle explicite
+
+        Parameters
+        ----------
+        text : object
+            Question utilisateur.
+
+        Returns
+        -------
+        bool
+            True si la requête contient une contrainte culturelle explicite.
         """
         text_norm = self.normalize_text(text)
+        if not text_norm:
+            return False
 
-        if self.extract_event_type(text_norm) in self.CULTURAL_EVENT_TYPES:
+        event_type = self.extract_event_type(text_norm)
+        if event_type in self.CULTURAL_EVENT_TYPES:
             return True
 
-        strong_terms = [
-            "exposition",
-            "expo",
-            "vernissage",
-            "concert",
-            "festival",
-            "projection",
-            "cinema",
-            "cinéma",
-            "conference",
-            "conférence",
-            "debat",
-            "débat",
-            "visite",
-            "atelier",
-            "spectacle",
-            "theatre",
-            "théâtre",
-            "conte",
-            "lecture",
-            "musee",
-            "musée",
-            "galerie",
-            "patrimoine",
-            "architecture",
-            "photo",
-            "photographie",
-        ]
-
-        if self.contains_any_term(text_norm, strong_terms):
-            return True
-
-        if self.contains_term(text_norm, "que faire") and self.contains_any_term(
+        if self.contains_any_term(
             text_norm,
-            ["montpellier", "paris", "sete", "toulouse", "lyon", "marseille", "bordeaux", "lille", "nantes"],
+            [
+                "evenement culturel",
+                "evenements culturels",
+                "sortie culturelle",
+                "sorties culturelles",
+                "activite culturelle",
+                "activites culturelles",
+            ],
         ):
             return True
 
-        if self.contains_any_term(text_norm, ["evenement culturel", "evenements culturels"]):
+        if self.contains_any_term(text_norm, self._strong_cultural_terms_norm):
             return True
 
         return False
+
+    def is_broad_activity_query(self, text: object) -> bool:
+        """
+        Détecte une requête large d'exploration d'activités.
+
+        Cette information ne doit pas activer un filtre fort.
+        Elle sert seulement à distinguer les questions du type :
+
+        - "que faire à Montpellier ?"
+        - "quoi faire ce week-end ?"
+        - "sorties à Montpellier"
+
+        d'une vraie contrainte culturelle explicite.
+
+        Parameters
+        ----------
+        text : object
+            Question utilisateur.
+
+        Returns
+        -------
+        bool
+            True si la question est une demande large d'activités / sorties.
+        """
+        text_norm = self.normalize_text(text)
+        if not text_norm:
+            return False
+
+        return self.contains_any_term(text_norm, self._weak_activity_terms_norm)
+
+    def extract_explicit_price_filter(self, text: object) -> str | None:
+        """
+        Extrait un filtre tarifaire uniquement s'il est explicite dans la question.
+
+        Parameters
+        ----------
+        text : object
+            Question utilisateur.
+
+        Returns
+        -------
+        str | None
+            "gratuit", "payant" ou None.
+        """
+        text_norm = self.normalize_text(text)
+        if not text_norm:
+            return None
+
+        if self.contains_any_term(text_norm, self._free_markers_norm):
+            return "gratuit"
+
+        if self.contains_any_term(text_norm, self._paid_markers_norm):
+            return "payant"
+
+        return None
 
     # ------------------------------------------------------------------
     # Dérivation de termes métier pour les documents
@@ -690,8 +1140,23 @@ class LexicalService:
         """
         Déduit quelques termes métier utiles pour enrichir le texte indexé.
 
-        Cette fonction peut être plus généreuse que l'inférence canonique,
-        car son but est surtout d'aider la recherche et le matching léger.
+        Cette fonction est un peu plus généreuse que l'inférence canonique,
+        mais reste volontairement resserrée pour éviter les enrichissements
+        trop faibles ou trop ambigus.
+
+        Parameters
+        ----------
+        title : str
+            Titre du document.
+        description : str
+            Description consolidée du document.
+        event_type : str
+            Type brut du document.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de termes métier dérivés.
         """
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
@@ -700,10 +1165,10 @@ class LexicalService:
         terms: set[str] = set()
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["exposition"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["exposition"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["exposition"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["exposition"])
             or (
-                self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["exposition"])
+                self.contains_any_term(desc_norm, self._event_type_terms_norm["exposition"])
                 and self.contains_any_term(
                     desc_norm,
                     ["art", "artiste", "galerie", "photo", "photographie"],
@@ -713,8 +1178,8 @@ class LexicalService:
             terms.update(["exposition", "expo", "vernissage"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["concert"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["concert"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["concert"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["concert"])
             or (
                 self.contains_any_term(
                     desc_norm,
@@ -726,59 +1191,59 @@ class LexicalService:
                 )
             )
         ):
-            terms.update(["concert", "musique", "live"])
+            terms.update(["concert", "musique"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["atelier"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["atelier"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["atelier"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["atelier"])
         ):
-            terms.update(["atelier", "initiation", "workshop"])
+            terms.update(["atelier"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["conte"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["conte"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["conte"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["conte"])
         ):
-            terms.update(["conte", "contes", "conteur"])
+            terms.update(["conte"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["conference"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["conference"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["conference"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["conference"])
         ):
-            terms.update(["conference", "conférence", "rencontre"])
+            terms.update(["conference"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["visite"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["visite"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["visite"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["visite"])
         ):
-            terms.update(["visite", "visites"])
+            terms.update(["visite"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["projection"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["projection"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["projection"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["projection"])
         ):
             terms.update(["projection", "film", "cinema"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["festival"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["festival"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["festival"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["festival"])
         ):
             terms.update(["festival"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["marche"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["marche"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["marche"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["marche"])
         ):
-            terms.update(["marche", "marché", "braderie"])
+            terms.update(["marche"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["spectacle"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["spectacle"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["spectacle"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["spectacle"])
         ):
-            terms.update(["spectacle", "theatre", "théâtre"])
+            terms.update(["spectacle", "theatre"])
 
         if (
-            self.contains_any_term(title_norm, self.EVENT_TYPE_TERMS["lecture"])
-            or self.contains_any_term(event_type_norm, self.EVENT_TYPE_TERMS["lecture"])
+            self.contains_any_term(title_norm, self._event_type_terms_norm["lecture"])
+            or self.contains_any_term(event_type_norm, self._event_type_terms_norm["lecture"])
         ):
             terms.update(["lecture"])
 
@@ -800,25 +1265,43 @@ class LexicalService:
         """
         Déduit quelques termes de genre musical utiles pour le ranking.
 
-        Version prudente :
-        - on ne déduit un genre que si le signal est explicite
-        - on évite de transformer des indices faibles en faux genres
+        La logique reste prudente :
+
+        - aucun genre n'est inféré sur des indices trop faibles
+        - le terme canonique est conservé
+        - les variantes réellement présentes peuvent être ajoutées
+
+        Parameters
+        ----------
+        title : str
+            Titre du document.
+        description : str
+            Description consolidée.
+        event_type : str
+            Type brut.
+
+        Returns
+        -------
+        list[str]
+            Liste triée de termes musicaux.
         """
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         event_type_norm = self.normalize_text(event_type)
 
-        support_text = f"{title_norm} {desc_norm} {event_type_norm}"
+        support_text = f"{title_norm} {desc_norm} {event_type_norm}".strip()
+        if not support_text:
+            return []
+
         terms: set[str] = set()
 
-        for canonical_genre, variants in self.MUSIC_GENRE_TERMS.items():
+        for canonical_genre, variants in self._music_genre_terms_norm.items():
             if self.contains_any_term(support_text, variants):
                 terms.add(canonical_genre)
-                terms.update(
-                    self.normalize_text(variant)
-                    for variant in variants
-                    if self.contains_term(support_text, variant)
-                )
+
+                for variant in variants:
+                    if self.contains_term(support_text, variant):
+                        terms.add(variant)
 
         return sorted(terms)
 
@@ -836,29 +1319,44 @@ class LexicalService:
         Déduit un type d'événement canonique simple.
 
         Logique prudente :
+
         1. priorité au titre
-        2. puis au champ event_type brut
+        2. puis au champ `event_type` brut
         3. puis à quelques signaux forts dans la description
-        4. sinon on retourne vide ou le type brut normalisé si vraiment exploitable
+        4. sinon chaîne vide
 
         On préfère renvoyer une chaîne vide plutôt qu'un faux type.
+
+        Parameters
+        ----------
+        title : str
+            Titre documentaire.
+        description : str
+            Description consolidée.
+        event_type : str
+            Type brut.
+
+        Returns
+        -------
+        str
+            Type canonique inféré ou chaîne vide.
         """
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         event_type_norm = self.normalize_text(event_type)
 
         strong_rules = [
-            ("exposition", self.EVENT_TYPE_TERMS["exposition"]),
-            ("concert", self.EVENT_TYPE_TERMS["concert"]),
-            ("visite", self.EVENT_TYPE_TERMS["visite"]),
-            ("conference", self.EVENT_TYPE_TERMS["conference"]),
-            ("atelier", self.EVENT_TYPE_TERMS["atelier"]),
-            ("conte", self.EVENT_TYPE_TERMS["conte"]),
-            ("projection", self.EVENT_TYPE_TERMS["projection"]),
-            ("festival", self.EVENT_TYPE_TERMS["festival"]),
-            ("marche", self.EVENT_TYPE_TERMS["marche"]),
-            ("spectacle", self.EVENT_TYPE_TERMS["spectacle"]),
-            ("lecture", self.EVENT_TYPE_TERMS["lecture"]),
+            ("exposition", self._event_type_terms_norm["exposition"]),
+            ("concert", self._event_type_terms_norm["concert"]),
+            ("visite", self._event_type_terms_norm["visite"]),
+            ("conference", self._event_type_terms_norm["conference"]),
+            ("atelier", self._event_type_terms_norm["atelier"]),
+            ("conte", self._event_type_terms_norm["conte"]),
+            ("projection", self._event_type_terms_norm["projection"]),
+            ("festival", self._event_type_terms_norm["festival"]),
+            ("marche", self._event_type_terms_norm["marche"]),
+            ("spectacle", self._event_type_terms_norm["spectacle"]),
+            ("lecture", self._event_type_terms_norm["lecture"]),
         ]
 
         for canonical_type, variants in strong_rules:
@@ -870,7 +1368,7 @@ class LexicalService:
                 return canonical_type
 
         if (
-            self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["exposition"])
+            self.contains_any_term(desc_norm, self._event_type_terms_norm["exposition"])
             and self.contains_any_term(
                 desc_norm,
                 ["art", "artiste", "galerie", "photo", "photographie"],
@@ -887,28 +1385,34 @@ class LexicalService:
         ):
             return "concert"
 
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["atelier"]):
-            return "atelier"
-
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["conference"]):
-            return "conference"
-
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["conte"]):
-            return "conte"
-
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["projection"]):
+        if (
+            self.contains_any_term(desc_norm, self._event_type_terms_norm["projection"])
+            and self.contains_any_term(desc_norm, ["film", "projection", "cinema", "cinéma"])
+        ):
             return "projection"
 
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["festival"]):
+        if (
+            self.contains_any_term(desc_norm, self._event_type_terms_norm["conference"])
+            and self.contains_any_term(desc_norm, ["conference", "conférence", "debat", "débat", "table ronde"])
+        ):
+            return "conference"
+
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["atelier"]):
+            return "atelier"
+
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["conte"]):
+            return "conte"
+
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["festival"]):
             return "festival"
 
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["marche"]):
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["marche"]):
             return "marche"
 
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["spectacle"]):
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["spectacle"]):
             return "spectacle"
 
-        if self.contains_any_term(desc_norm, self.EVENT_TYPE_TERMS["lecture"]):
+        if self.contains_any_term(desc_norm, self._event_type_terms_norm["lecture"]):
             return "lecture"
 
         if event_type_norm in {
@@ -937,21 +1441,36 @@ class LexicalService:
         """
         Déduit un genre musical canonique simple lorsqu'il est identifiable.
 
-        Version très prudente :
+        Logique très prudente :
+
         - priorité au titre
         - puis à la description
-        - aucun genre n'est inféré sur des indices faibles
-        - on préfère retourner vide plutôt qu'un faux genre
+        - aucun genre n'est inféré sur indice faible
+        - sinon chaîne vide
+
+        Parameters
+        ----------
+        title : str
+            Titre documentaire.
+        description : str
+            Description consolidée.
+        event_type : str
+            Type brut.
+
+        Returns
+        -------
+        str
+            Genre musical canonique ou chaîne vide.
         """
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         _ = self.normalize_text(event_type)
 
-        for canonical_genre, variants in self.MUSIC_GENRE_TERMS.items():
+        for canonical_genre, variants in self._music_genre_terms_norm.items():
             if self.contains_any_term(title_norm, variants):
                 return canonical_genre
 
-        for canonical_genre, variants in self.MUSIC_GENRE_TERMS.items():
+        for canonical_genre, variants in self._music_genre_terms_norm.items():
             if self.contains_any_term(desc_norm, variants):
                 return canonical_genre
 
@@ -965,28 +1484,50 @@ class LexicalService:
         """
         Extrait quelques signaux lexicaux simples depuis une question.
 
-        Ce helper sert de base commune à filter_service et retrieval_service.
+        Ce helper sert de base commune à `filter_service`
+        et `retrieval_service`.
+
+        Principe important :
+        les filtres ne doivent s'activer que si la contrainte
+        est explicitement présente dans la question.
 
         Signaux renvoyés :
+
         - texte normalisé
         - mots-clés
         - type d'événement explicite
         - genre musical explicite
-        - filtre tarifaire simple
-        - signaux de public
-        - indicateur de requête culturelle large
+        - filtre tarifaire explicite
+        - signaux de public explicites
+        - indicateur de contrainte culturelle explicite
+        - indicateur de requête large d'activité
+        - signaux négatifs métier simples
+
+        Parameters
+        ----------
+        question : str
+            Question utilisateur brute.
+
+        Returns
+        -------
+        dict[str, Any]
+            Dictionnaire structuré de signaux.
         """
         question_norm = self.normalize_text(question)
-        price_info, _ = self.extract_price_info(question_norm)
 
         return {
             "question_norm": question_norm,
             "keywords": self.extract_keywords(question_norm),
             "event_type": self.extract_event_type(question_norm),
             "music_genre": self.extract_music_genre(question_norm),
-            "price_filter": None if price_info == "inconnu" else price_info,
+            "price_filter": self.extract_explicit_price_filter(question_norm),
             "audience_terms": self.extract_audience_terms(question_norm),
             "is_cultural_query": self.is_cultural_query(question_norm),
+            "is_broad_activity_query": self.is_broad_activity_query(question_norm),
+            "has_market_signal": self.has_market_signal(question_norm),
+            "has_repair_signal": self.has_repair_signal(question_norm),
+            "has_religious_signal": self.has_religious_signal(question_norm),
+            "has_business_signal": self.has_business_signal(question_norm),
         }
 
     def build_document_lexical_profile(
@@ -1000,10 +1541,27 @@ class LexicalService:
         """
         Construit un petit profil lexical de document réutilisable.
 
-        Ce helper peut être utilisé par document_service pour limiter
-        la duplication locale.
+        Ce helper est destiné à réduire la duplication dans
+        `document_service`.
+
+        Parameters
+        ----------
+        title : str
+            Titre du document.
+        description : str
+            Description courte ou standard.
+        long_description : str
+            Description longue éventuelle.
+        event_type : str
+            Type brut.
+
+        Returns
+        -------
+        dict[str, Any]
+            Profil lexical structuré du document.
         """
         full_description = self.join_texts(description, long_description)
+        support_text = self.join_texts(title, full_description, event_type)
 
         keywords_title = self.extract_title_keywords(title)
         derived_event_terms = self.derive_event_terms(
@@ -1037,4 +1595,8 @@ class LexicalService:
             "audience_terms": audience_terms,
             "canonical_event_type": canonical_event_type,
             "music_genre": music_genre,
+            "has_market_signal": self.has_market_signal(support_text),
+            "has_repair_signal": self.has_repair_signal(support_text),
+            "has_religious_signal": self.has_religious_signal(support_text),
+            "has_business_signal": self.has_business_signal(support_text),
         }
