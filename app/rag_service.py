@@ -176,7 +176,7 @@ class RAGService:
         # conversationnelle, mais les faits doivent toujours venir
         # du contexte documentaire.
         self.prompt = ChatPromptTemplate.from_template(
-            """
+        """
 Tu es un assistant spécialisé dans les événements culturels.
 
 Tu réponds uniquement à partir des documents fournis dans le contexte.
@@ -188,15 +188,15 @@ Les faits utilisés dans la réponse doivent toujours provenir
 du contexte documentaire.
 
 Consignes de réponse :
-- Tu dois lister tous les événements pertinents présents dans le contexte.
-- Tu ne dois en omettre aucun.
-- Chaque document pertinent du contexte doit apparaître une fois dans la réponse.
-
 - Si aucun document pertinent n'est disponible, réponds exactement :
   "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
 
 - Les dates doivent toujours être sous la forme AAAA/MM/JJ.
 - Les intervalles de dates doivent toujours être sous la forme AAAA/MM/JJ au AAAA/MM/JJ.
+- Tu dois lister tous les événements présents dans le contexte final.
+- Tu ne dois en oublier aucun.
+- Chaque événement du contexte doit apparaître une seule fois dans la réponse.
+- Le nombre de lignes de la liste doit correspondre au nombre d'événements présents dans le contexte.
 
 - Si des documents pertinents sont disponibles, réponds toujours et uniquement sous la forme :
 Liste d'événements pour {question} :
@@ -216,7 +216,7 @@ Question :
 Contexte :
 {context}
 """.strip()
-        )
+)
 
         # Prompt de reformulation pour produire une question autonome
         # à partir de l'historique récent.
