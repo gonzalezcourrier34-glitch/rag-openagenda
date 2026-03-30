@@ -48,7 +48,7 @@
 
 <div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
-  Lancer rapidement le projet dans un environnement local reproductible, reconstruire l’index vectoriel, puis interroger l’assistant depuis l’interface Streamlit.
+  Lancer rapidement le projet dans un environnement local reproductible, reconstruire l’index vectoriel, puis interroger l’assistant depuis l’interface Streamlit ou via l’API.
 </div>
 
 <pre><code>git clone repo_url
@@ -91,12 +91,13 @@ Ce projet m’a permis de travailler sur une chaîne complète, depuis la collec
 <ul>
   <li>collecte des données via API</li>
   <li>préparation et structuration des données textuelles</li>
+  <li>préfiltrage structuré et reranking métier</li>
   <li>vectorisation et recherche sémantique</li>
   <li>génération de réponse avec un LLM</li>
   <li>exposition du système via API FastAPI</li>
   <li>développement d’une interface utilisateur Streamlit</li>
   <li>conteneurisation avec Docker</li>
-  <li>mise en place d’une logique CI/CD avec GitHub Actions</li>
+  <li>mise en place d’une base CI/CD avec GitHub Actions</li>
 </ul>
 
 <hr>
@@ -133,6 +134,8 @@ C’est précisément l’intérêt d’une architecture RAG, qui combine une ph
 <ul>
   <li>des données réelles issues d’une API externe</li>
   <li>une recherche vectorielle sur des documents indexés</li>
+  <li>un préfiltrage structuré pour mieux respecter les contraintes fortes</li>
+  <li>un ranking métier explicable avant génération</li>
   <li>un modèle de langage capable de générer une réponse contextualisée</li>
   <li>une architecture modulaire exposée via API et dashboard</li>
   <li>une base technique structurée pour évoluer vers un déploiement reproductible</li>
@@ -178,11 +181,13 @@ FastAPI
      ▼
 RAGService
  │
- ├── document_service → collecte, persistance et préparation des événements
+ ├── document_service → collecte, normalisation et préparation des événements
+ ├── lexical_service → normalisation et signaux lexicaux partagés
  ├── filter_service → préfiltrage structuré des documents
- ├── retrieval_service → ranking métier des candidats
+ ├── retrieval_service → scoring et ranking métier des candidats
  ├── FAISS → recherche vectorielle
  ├── memory_service → mémoire locale des échanges
+ ├── trace_service → traces et debug du pipeline
  └── Mistral → génération de réponse
      │
      ▼
@@ -209,7 +214,9 @@ Ce découpage m’a permis de séparer clairement :
 
 <ul>
   <li>la récupération des données</li>
-  <li>la logique RAG</li>
+  <li>la logique lexicale commune</li>
+  <li>le filtrage métier</li>
+  <li>le ranking documentaire</li>
   <li>la mémoire conversationnelle</li>
   <li>l’exposition via API</li>
   <li>l’interface utilisateur</li>
@@ -227,14 +234,18 @@ Ce découpage m’a permis de séparer clairement :
   Transformer une question en langage naturel en une réponse fiable, fondée sur des documents réellement retrouvés dans la base événementielle.
 </div>
 
-<pre><code>1. Préfiltrage des documents (ville, date, type d’événement)
-2. Recherche vectorielle via FAISS
-3. Ranking métier des candidats
-4. Construction du contexte final
-5. Génération de la réponse avec le LLM</code></pre>
+<pre><code>1. Reformulation légère / prise en compte de la mémoire de session
+2. Préfiltrage structuré des documents (ville, date, type, prix, genre, etc.)
+3. Recherche vectorielle via FAISS
+4. Ranking métier des candidats
+5. Post-filtrage strict si nécessaire
+6. Construction du contexte final
+7. Génération de la réponse avec le LLM
+8. Retour de la réponse + documents sources
+9. Endpoint debug disponible pour inspection détaillée</code></pre>
 
 <p>
-Cette organisation permet de mieux contrôler la qualité des résultats et de limiter les réponses déconnectées des données disponibles.
+Cette organisation permet de mieux contrôler la qualité des résultats, de limiter les réponses déconnectées des données disponibles et d’améliorer l’explicabilité du pipeline.
 </p>
 
 <hr>
@@ -247,23 +258,6 @@ Cette organisation permet de mieux contrôler la qualité des résultats et de l
 Les données proviennent de l’API <strong>OpenAgenda</strong>. Les événements sont récupérés à l’aide de requêtes paginées, en filtrant selon une zone géographique et un périmètre définis dans la configuration.
 </p>
 
-<h3 style="color: #48C9B0;">Persistance des données</h3>
-
-<p>
-Afin de rendre le système plus robuste, j’ai ajouté une étape de persistance locale des données récupérées depuis l’API. Les événements peuvent être sauvegardés au format <strong>JSON</strong> et <strong>CSV</strong> dans le répertoire <code>data/</code>.
-</p>
-
-<p>
-Cette étape me permet :
-</p>
-
-<ul>
-  <li>de rejouer le pipeline sans dépendre systématiquement de l’API</li>
-  <li>de conserver une trace des données collectées</li>
-  <li>de faciliter la reconstruction de l’index vectoriel</li>
-  <li>de structurer plus proprement le projet entre données brutes et données préparées</li>
-</ul>
-
 <h3 style="color: #48C9B0;">Préparation des données</h3>
 
 <p>
@@ -271,10 +265,11 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
 </p>
 
 <ul>
-  <li>d’uniformiser les noms de colonnes</li>
+  <li>d’uniformiser les champs utiles au pipeline</li>
   <li>de gérer les valeurs manquantes</li>
   <li>de nettoyer les champs textuels</li>
-  <li>de préparer les métadonnées utiles pour l’affichage, le filtrage et la recherche</li>
+  <li>de construire des métadonnées utiles pour l’affichage, le filtrage et la recherche</li>
+  <li>de produire un texte documentaire lisible pour le LLM et un texte enrichi pour la recherche</li>
 </ul>
 
 <h3 style="color: #48C9B0;">Chunking</h3>
@@ -282,50 +277,50 @@ Les événements bruts sont ensuite normalisés afin d’obtenir une structure c
 <p>
 Dans ce projet, j’ai fait le choix de considérer <strong>chaque événement comme un document unique</strong>. Ce choix est adapté au format des données et au périmètre du prototype.
 </p>
-<p>
-Un exemple de structure de document :
-</p>
-<p>
-    
-    Document(
-    page_content="<fiche courte lisible pour le LLM contenant : >",
-        "Titre : "
-        "Description :"
-        "Lieu :"
-        "Ville :"
-        "Région :"
-        "Date de début :"
-        "Date de fin :"
-        "Type :"
-        "Tarification :"
-        "URL :"
+
+<p>Un exemple simplifié de structure documentaire :</p>
+
+<pre><code class="language-python">Document(
+    page_content=(
+        "Titre : ...\n"
+        "Lieu : ...\n"
+        "Ville : ...\n"
+        "Région : ...\n"
+        "Date de début : ...\n"
+        "Date de fin : ...\n"
+        "Type : ...\n"
+        "Genre musical : ...\n"
+        "Tarification : ...\n"
+        "Description : ...\n"
+        "URL : ..."
+    ),
     metadata={
-        "doc_id": "<identifiant documentaire>",
-        "event_uid": "<uid OpenAgenda>",
-        "agenda_uid": "<uid agenda>",
+        "doc_id": "...",
+        "event_uid": "...",
+        "agenda_uid": "...",
         "source": "openagenda",
 
-        "title": "<titre nettoyé>",
-        "description": "<description complète nettoyée>",
-        "long_description": "<description longue nettoyée>",
-        "description_short": "<description courte pour page_content>",
-        "description_search": "<description optimisée pour embedding>",
-        "long_description_search": "<longue description optimisée pour embedding>",
+        "title": "...",
+        "description": "...",
+        "long_description": "...",
+        "description_short": "...",
+        "description_search": "...",
+        "long_description_search": "...",
 
-        "location_name": "<lieu>",
-        "city": "<ville>",
-        "region": "<région>",
-        "first_date": "<YYYY-MM-DD>",
-        "last_date": "<YYYY-MM-DD>",
+        "location_name": "...",
+        "city": "...",
+        "region": "...",
+        "first_date": "YYYY-MM-DD",
+        "last_date": "YYYY-MM-DD",
 
-        "event_type": "<type brut>",
-        "canonical_event_type": "<type canonique>",
-        "music_genre": "<genre musical canonique>",
+        "event_type": "...",
+        "canonical_event_type": "...",
+        "music_genre": "...",
 
-        "source_url": "<url source>",
-        "url": "<url source>",
+        "source_url": "...",
+        "url": "...",
 
-        "price_info": "<gratuit|payant|inconnu...>",
+        "price_info": "...",
         "is_free": True | False | None,
 
         "keywords_title": [...],
@@ -334,23 +329,22 @@ Un exemple de structure de document :
         "audience_terms": [...],
         "cultural_tags": [...],
 
-        "search_text": "<texte riche pour embeddings>",
+        "search_text": "...",
 
-        "title_norm": "<texte normalisé>",
-        "location_name_norm": "<texte normalisé>",
-        "city_norm": "<texte normalisé>",
-        "region_norm": "<texte normalisé>",
-        "event_type_norm": "<texte normalisé>",
-        "music_genre_norm": "<texte normalisé>",
+        "title_norm": "...",
+        "location_name_norm": "...",
+        "city_norm": "...",
+        "region_norm": "...",
+        "event_type_norm": "...",
+        "music_genre_norm": "...",
 
-        "duration_label": "<libellé métier>",
-        "duration_days": <int|None>,
-        "is_single_day": <bool|None>,
-        "has_long_description": <bool>,
-        "content_quality": <int>,
+        "duration_label": "...",
+        "duration_days": int | None,
+        "is_single_day": bool | None,
+        "has_long_description": bool,
+        "content_quality": int,
     }
-)
-</p>
+)</code></pre>
 
 <p>
 Le texte utilisé pour la vectorisation est construit à partir des informations les plus utiles :
@@ -386,6 +380,7 @@ Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral
     <li>des événements réellement disponibles dans OpenAgenda</li>
     <li>de la zone choisie</li>
     <li>de la période configurée</li>
+    <li>de la qualité du préfiltrage et du ranking</li>
   </ul>
 </div>
 
@@ -444,7 +439,9 @@ Chaque document conserve également des métadonnées utiles, notamment :
   <li>lieu</li>
   <li>dates</li>
   <li>type d’événement</li>
+  <li>genre musical</li>
   <li>URL source</li>
+  <li>prix et gratuité</li>
 </ul>
 
 <hr>
@@ -473,23 +470,52 @@ Permet de poser une question au système RAG.
 </p>
 
 <pre><code>{
-  "question": "Je cherche une exposition à Montpellier"
+  "question": "Je cherche une exposition à Montpellier",
+  "session_id": "default"
 }</code></pre>
 
 <p>Exemple de structure de réponse :</p>
 
 <pre><code>{
-  "question": "...",
-  "answer": "Voici quelques événements à Montpellier...",
+  "question": "Je cherche une exposition à Montpellier",
+  "answer": "Voici quelques événements pertinents à Montpellier...",
   "n_docs": 3,
   "documents": [
     {
       "title": "Exposition ...",
-      "date": "2025-09-21",
-      "lieu": "Musée Fabre"
+      "city": "Montpellier",
+      "location_name": "Musée Fabre",
+      "region": "Occitanie",
+      "first_date": "2025-09-21",
+      "last_date": "2025-09-23",
+      "event_type": "Exposition",
+      "url": "https://...",
+      "price_info": "gratuit",
+      "is_free": true,
+      "keywords_title": [],
+      "score": null
     }
-  ]
+  ],
+  "session_id": "default"
 }</code></pre>
+
+<h3 style="color: #48C9B0;"><code>/ask/debug</code></h3>
+
+<p>
+Permet d’exécuter le pipeline RAG avec un retour détaillé destiné au debug, à l’inspection métier et à l’évaluation.
+</p>
+
+<p>
+Cet endpoint retourne notamment :
+</p>
+
+<ul>
+  <li>la question effective utilisée dans le pipeline</li>
+  <li>l’historique de session</li>
+  <li>les contextes récupérés</li>
+  <li>les documents retenus</li>
+  <li>les informations de filtrage et de debug</li>
+</ul>
 
 <h3 style="color: #48C9B0;"><code>/rebuild</code></h3>
 
@@ -506,7 +532,7 @@ Cet endpoint joue un rôle central lors du premier démarrage, car l’API doit 
 <h2 id="section-9">9. Tests</h2>
 
 <p>
-Afin de fiabiliser le projet, j’ai mis en place une base de tests automatisés sur les composants essentiels du système, notamment l’API, certains services applicatifs et les comportements attendus sur les endpoints principaux.
+Afin de fiabiliser le projet, j’ai mis en place une base de tests automatisés sur les composants essentiels du système, notamment l’API, les services applicatifs et les comportements attendus sur les endpoints principaux.
 </p>
 
 <p>
@@ -515,8 +541,22 @@ Cette démarche permet de vérifier plus facilement :
 
 <ul>
   <li>le bon fonctionnement des endpoints critiques</li>
-  <li>la stabilité du comportement attendu lors des évolutions du code</li>
+  <li>la stabilité des services métier</li>
+  <li>la cohérence du filtrage et du ranking</li>
   <li>la non-régression sur les fonctionnalités principales du prototype</li>
+</ul>
+
+<p><strong>Exemples de modules testés :</strong></p>
+
+<ul>
+  <li><code>main.py</code></li>
+  <li><code>document_service.py</code></li>
+  <li><code>lexical_service.py</code></li>
+  <li><code>filter_service.py</code></li>
+  <li><code>retrieval_service.py</code></li>
+  <li><code>memory_service.py</code></li>
+  <li><code>security.py</code></li>
+  <li><code>trace_service.py</code></li>
 </ul>
 
 <p><strong>Lancer les tests :</strong></p>
@@ -537,9 +577,11 @@ Cette démarche permet de vérifier plus facilement :
 │   ├── main.py
 │   ├── rag_service.py
 │   ├── document_service.py
+│   ├── lexical_service.py
 │   ├── filter_service.py
 │   ├── retrieval_service.py
 │   ├── memory_service.py
+│   ├── trace_service.py
 │   ├── schemas.py
 │   ├── security.py
 │   └── config.py
@@ -548,16 +590,11 @@ Cette démarche permet de vérifier plus facilement :
 │   └── dashboard.py
 │
 ├── data/
-│   ├── raw/
-│   ├── processed/
-│   └── index/
 │
 ├── docs/
 ├── tests/
 ├── .github/
 │   └── workflows/
-│       ├── ci.yml
-│       └── cd.yml
 │
 ├── Dockerfile
 ├── docker-compose.yml
@@ -587,6 +624,7 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
   <li>visualiser les documents utilisés</li>
   <li>consulter un historique local</li>
   <li>déclencher une reconstruction de la base</li>
+  <li>inspecter plus facilement l’état général du service</li>
 </ul>
 
 <hr>
@@ -615,7 +653,7 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
   <li>séparation des services</li>
   <li>reproductibilité de l’environnement</li>
   <li>portabilité du projet</li>
-  <li>intégration future dans une chaîne CI/CD complète</li>
+  <li>intégration facilitée dans une chaîne CI/CD</li>
 </ul>
 
 <hr>
@@ -626,8 +664,9 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
   <li>la qualité dépend fortement des données disponibles dans OpenAgenda</li>
   <li>le volume d’événements peut rester limité selon la zone ou la période choisie</li>
   <li>le filtrage métier reste encore perfectible</li>
+  <li>le reranking reste heuristique et améliorable</li>
   <li>les coûts peuvent augmenter avec les embeddings et les appels LLM</li>
-  <li>pas encore de recherche hybride vectorielle et lexicale</li>
+  <li>pas encore de recherche hybride vectorielle et lexicale complète</li>
   <li>pas encore de reranking avancé de type cross-encoder</li>
 </ul>
 
@@ -642,8 +681,9 @@ L’ensemble de l’application est conteneurisé avec <strong>Docker</strong> e
   <li>mémoire conversationnelle plus évoluée</li>
   <li>déploiement cloud</li>
   <li>monitoring plus complet</li>
-  <li>renforcement du pipeline CI/CD</li>
+  <li>renforcement de la chaîne CI/CD</li>
   <li>mise en cache des embeddings</li>
+  <li>amélioration du mode debug et de l’évaluation automatique</li>
 </ul>
 
 <hr>
@@ -748,6 +788,13 @@ Une fois l’index reconstruit, il est possible de poser une question depuis le 
 </p>
 
 <pre><code>curl -X POST "http://localhost:8000/ask" \
+  -H "Content-Type: application/json" \
+  -H "x-api-key: votre_token_api_perso" \
+  -d "{\"question\":\"Je cherche une exposition d'architecture à Montpellier\"}"</code></pre>
+
+<p>Pour le mode debug :</p>
+
+<pre><code>curl -X POST "http://localhost:8000/ask/debug" \
   -H "Content-Type: application/json" \
   -H "x-api-key: votre_token_api_perso" \
   -d "{\"question\":\"Je cherche une exposition d'architecture à Montpellier\"}"</code></pre>
