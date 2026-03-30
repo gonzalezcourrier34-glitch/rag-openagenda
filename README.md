@@ -46,7 +46,7 @@
 
 <h2 id="section-1">1. Quick Start</h2>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
   Lancer rapidement le projet dans un environnement local reproductible, reconstruire l’index vectoriel, puis interroger l’assistant depuis l’interface Streamlit ou via l’API.
 </div>
@@ -66,10 +66,10 @@ docker compose up --build</code></pre>
   <li>poser une question</li>
 </ol>
 
-<div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000;padding: 14px 18px; margin: 18px 0;">
   <strong>Important</strong><br><br>
-  Le système <strong>ne fonctionne pas tant que l’index n’est pas construit</strong>.<br>
-  Il faut exécuter <code>/rebuild</code> avant toute première utilisation.
+  Le système <strong>ne peut pas répondre tant que l’index vectoriel n’a pas été construit</strong>.<br>
+  Il faut donc exécuter <code>/rebuild</code> avant la première utilisation.
 </div>
 
 <hr>
@@ -94,7 +94,7 @@ Ce projet m’a permis de travailler sur une chaîne complète, depuis la collec
   <li>préfiltrage structuré et reranking métier</li>
   <li>vectorisation et recherche sémantique</li>
   <li>génération de réponse avec un LLM</li>
-  <li>exposition du système via API FastAPI</li>
+  <li>exposition du système via une API FastAPI</li>
   <li>développement d’une interface utilisateur Streamlit</li>
   <li>conteneurisation avec Docker</li>
   <li>mise en place d’une base CI/CD avec GitHub Actions</li>
@@ -126,7 +126,7 @@ C’est précisément l’intérêt d’une architecture RAG, qui combine une ph
 
 <h3 style="color: #48C9B0;">Objectif du POC</h3>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
   Avec ce prototype, j’ai cherché à démontrer la faisabilité technique d’un assistant de recommandation culturelle reposant sur des données réelles, une recherche vectorielle, un modèle de langage contraint par le contexte et une architecture modulaire exposée via API et dashboard.
 </div>
@@ -135,8 +135,8 @@ C’est précisément l’intérêt d’une architecture RAG, qui combine une ph
   <li>des données réelles issues d’une API externe</li>
   <li>une recherche vectorielle sur des documents indexés</li>
   <li>un préfiltrage structuré pour mieux respecter les contraintes fortes</li>
-  <li>un ranking métier explicable avant génération</li>
-  <li>un modèle de langage capable de générer une réponse contextualisée</li>
+  <li>un ranking métier explicable avant la génération</li>
+  <li>un modèle de langage capable de produire une réponse contextualisée</li>
   <li>une architecture modulaire exposée via API et dashboard</li>
   <li>une base technique structurée pour évoluer vers un déploiement reproductible</li>
 </ul>
@@ -170,29 +170,27 @@ et obtenir une réponse générée à partir d’événements réellement prése
 L’architecture repose sur une chaîne de traitement modulaire dans laquelle chaque composant remplit un rôle précis.
 </p>
 
-<pre><code>Utilisateur
-     │
-     ▼
-Streamlit
-     │
-     ▼
-FastAPI
-     │
-     ▼
-RAGService
- │
- ├── document_service → collecte, normalisation et préparation des événements
- ├── lexical_service → normalisation et signaux lexicaux partagés
- ├── filter_service → préfiltrage structuré des documents
- ├── retrieval_service → scoring et ranking métier des candidats
- ├── FAISS → recherche vectorielle
- ├── memory_service → mémoire locale des échanges
- ├── trace_service → traces et debug du pipeline
- └── Mistral → génération de réponse
-     │
-     ▼
-Réponse + documents sources</code></pre>
+```mermaid
+flowchart TD
+    U[Utilisateur] --> UI[Streamlit Dashboard]
+    UI --> API[FastAPI API]
+    API --> RAG[RAGService]
 
+    RAG --> DOC[document_service]
+    RAG --> LEX[lexical_service]
+    RAG --> FIL[filter_service]
+    RAG --> RET[retrieval_service]
+    RAG --> MEM[memory_service]
+    RAG --> TRACE[trace_service]
+    RAG --> LLM[Mistral Small]
+    RAG --> FAISS[(FAISS)]
+
+    DOC --> OA[OpenAgenda API]
+    API --> PG[(PostgreSQL)]
+    API --> MLF[MLflow]
+
+    LLM --> ANS[Réponse + documents sources]
+```
 <p>
 Dans la version conteneurisée du projet, cette logique s’intègre dans une architecture plus large :
 </p>
@@ -229,25 +227,49 @@ Ce découpage m’a permis de séparer clairement :
 
 <h2 id="section-5">5. Pipeline RAG</h2>
 
-<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #48C9B0; background: #f8fdfc; color: #000; padding: 14px 18px; margin: 18px 0;">
   <strong>Objectif</strong><br><br>
   Transformer une question en langage naturel en une réponse fiable, fondée sur des documents réellement retrouvés dans la base événementielle.
 </div>
 
-<pre><code>1. Reformulation légère / prise en compte de la mémoire de session
-2. Préfiltrage structuré des documents (ville, date, type, prix, genre, etc.)
-3. Recherche vectorielle via FAISS
-4. Ranking métier des candidats
-5. Post-filtrage strict si nécessaire
-6. Construction du contexte final
-7. Génération de la réponse avec le LLM
-8. Retour de la réponse + documents sources
-9. Endpoint debug disponible pour inspection détaillée</code></pre>
-
+```mermaid
+flowchart LR
+    Q[Question utilisateur] --> R1[Reformulation légère\n+ mémoire de session]
+    R1 --> F1[Préfiltrage structuré\nville date type prix genre]
+    F1 --> V1[Recherche vectorielle\nFAISS]
+    V1 --> RK[Ranking métier]
+    RK --> PF[Post-filtrage strict\nsi nécessaire]
+    PF --> CTX[Construction du contexte final]
+    CTX --> LLM[Mistral Small]
+    LLM --> A[Réponse générée]
+    A --> SRC[Documents sources + debug]
+```
 <p>
 Cette organisation permet de mieux contrôler la qualité des résultats, de limiter les réponses déconnectées des données disponibles et d’améliorer l’explicabilité du pipeline.
 </p>
 
+```mermaid
+sequenceDiagram
+    participant User as Utilisateur
+    participant UI as Streamlit
+    participant API as FastAPI
+    participant RAG as RAGService
+    participant FAISS as FAISS
+    participant LLM as Mistral
+
+    User->>UI: Pose une question
+    UI->>API: POST /ask
+    API->>RAG: ask(question, session_id)
+    RAG->>RAG: préfiltrage + mémoire
+    RAG->>FAISS: recherche sémantique
+    FAISS-->>RAG: documents candidats
+    RAG->>RAG: ranking métier + contexte final
+    RAG->>LLM: prompt + contexte
+    LLM-->>RAG: réponse générée
+    RAG-->>API: answer + documents
+    API-->>UI: JSON de réponse
+    UI-->>User: affichage lisible
+```
 <hr>
 
 <h2 id="section-6">6. Données et vectorisation</h2>
@@ -373,7 +395,7 @@ Le texte utilisé pour la vectorisation est construit à partir des informations
 Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral</strong>. Chaque document est transformé en vecteur puis ajouté dans un index <strong>FAISS</strong> afin de permettre une recherche sémantique rapide.
 </p>
 
-<div style="border-left: 5px solid #F5B041; background: #FFF8E8; padding: 14px 18px; margin: 18px 0;">
+<div style="border-left: 5px solid #F5B041; background: #FFF8E8; color: #000; padding: 14px 18px; margin: 18px 0;">
   <strong>Important</strong><br><br>
   La qualité des réponses dépend directement :
   <ul>
@@ -384,35 +406,7 @@ Pour la vectorisation, j’ai utilisé un modèle d’<strong>embeddings Mistral
   </ul>
 </div>
 
-<hr>
-
-<h2 id="section-7">7. Modèle NLP</h2>
-
-<p>
-Pour la génération de réponses, j’ai choisi <strong>Mistral Small</strong>.
-</p>
-
-<p>
-Ce choix m’a semblé pertinent pour plusieurs raisons :
-</p>
-
-<ul>
-  <li>bonne qualité de génération</li>
-  <li>coût raisonnable pour un prototype</li>
-  <li>intégration simple avec LangChain</li>
-</ul>
-
-<p>
-Le prompt utilisé impose une contrainte importante : le modèle doit répondre uniquement à partir du contexte documentaire retrouvé et ne pas inventer d’événements.
-</p>
-
-<p>
-La principale limite reste la dépendance à la qualité du retrieval. Si les documents remontés sont peu pertinents, la génération finale en hérite directement.
-</p>
-
-<hr>
-
-<h2>Base vectorielle</h2>
+<h3 style="color: #48C9B0;">Base vectorielle</h3>
 
 <p>
 La base vectorielle est construite avec <strong>FAISS</strong>. Une fois les embeddings générés, les documents sont stockés dans l’index puis sauvegardés localement.
@@ -443,6 +437,32 @@ Chaque document conserve également des métadonnées utiles, notamment :
   <li>URL source</li>
   <li>prix et gratuité</li>
 </ul>
+
+<hr>
+
+<h2 id="section-7">7. Modèle NLP</h2>
+
+<p>
+Pour la génération de réponses, j’ai choisi <strong>Mistral Small</strong>.
+</p>
+
+<p>
+Ce choix m’a semblé pertinent pour plusieurs raisons :
+</p>
+
+<ul>
+  <li>bonne qualité de génération</li>
+  <li>coût raisonnable pour un prototype</li>
+  <li>intégration simple avec LangChain</li>
+</ul>
+
+<p>
+Le prompt utilisé impose une contrainte importante : le modèle doit répondre uniquement à partir du contexte documentaire retrouvé et ne pas inventer d’événements.
+</p>
+
+<p>
+La principale limite reste la dépendance à la qualité du retrieval. Si les documents remontés sont peu pertinents, la génération finale en hérite directement.
+</p>
 
 <hr>
 
@@ -519,6 +539,16 @@ Cet endpoint retourne notamment :
 
 <h3 style="color: #48C9B0;"><code>/rebuild</code></h3>
 
+```mermaid
+flowchart TD
+    START[/POST /rebuild/] --> OA[Collecte OpenAgenda]
+    OA --> NORM[Normalisation des événements]
+    NORM --> DOCS[Création des documents]
+    DOCS --> EMB[Embeddings Mistral]
+    EMB --> INDEX[Construction index FAISS]
+    INDEX --> SAVE[Sauvegarde locale de l'index]
+    SAVE --> READY[Système prêt pour /ask]
+```
 <p>
 Permet de reconstruire la base documentaire et l’index vectoriel à partir des données OpenAgenda.
 </p>
@@ -590,7 +620,6 @@ Cette démarche permet de vérifier plus facilement :
 │   └── dashboard.py
 │
 ├── data/
-│
 ├── docs/
 ├── tests/
 ├── .github/
@@ -630,6 +659,22 @@ J’ai également développé une interface <strong>Streamlit</strong> pour faci
 <hr>
 
 <h2 id="section-12">12. Infrastructure</h2>
+
+```mermaid
+flowchart LR
+    subgraph Docker Compose
+        DASH[dashboard\nStreamlit]
+        API[api\nFastAPI]
+        DB[(PostgreSQL)]
+        MLF[MLflow]
+    end
+
+    DASH --> API
+    API --> DB
+    API --> MLF
+    API --> OA[OpenAgenda API]
+    API --> FAISS[(FAISS local)]
+```
 
 <h3 style="color: #48C9B0;">MLflow</h3>
 
