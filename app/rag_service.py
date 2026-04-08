@@ -45,12 +45,15 @@ Deux représentations textuelles coexistent volontairement :
 - `search_text` :
   texte riche destiné à l'embedding et à la recherche vectorielle
 - `format_doc()` :
-  fiche courte et structurée destinée au LLM
+  fiche compacte destinée au LLM
+- `format_doc_debug()` :
+  fiche détaillée destinée au debug / affichage
 
 Cette séparation permet :
 
 - un retrieval plus riche sémantiquement
-- un contexte plus compact et plus propre pour la génération
+- un contexte LLM plus compact
+- un affichage debug plus lisible et plus complet
 
 ## Mémoire conversationnelle
 
@@ -118,12 +121,11 @@ class RAGService:
     des variables d'environnement afin de permettre un changement
     de provider sans modifier le code métier.
     """
-    # Cette classe ne fait pas "tout toute seule".
-    # Elle orchestre les briques spécialisées :
-    # documents, filtre, retrieval, mémoire, génération, traces.
 
     EMPTY_ANSWER = "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
-    # Réponse standard lorsque le pipeline ne trouve aucun document exploitable.
+    TEMPORARY_LLM_UNAVAILABLE_ANSWER = (
+        "Le modèle est momentanément indisponible. Merci de réessayer dans quelques instants."
+    )
 
     def __init__(
         self,
@@ -166,8 +168,6 @@ class RAGService:
         trace_file : str | Path
             Fichier de sortie des traces.
         """
-        # Paramètres généraux du pipeline :
-        # corpus, index, embeddings, LLM, zone, scope, tailles de top-k.
         self.documents = documents or []
         self.index_dir = Path(index_dir) if index_dir else FAISS_INDEX_DIR
         self.top_k_retrieval = top_k_retrieval
@@ -175,14 +175,11 @@ class RAGService:
         self.zone = zone
         self.scope = scope
 
-        # On mémorise explicitement les noms de modèles afin de pouvoir
-        # les tracer et les afficher en debug.
+        # Noms de modèles conservés pour le debug et les traces.
         self.embedding_model_name = embedding_model
         self.llm_model_name = llm_model
 
-        # Construction dynamique des composants selon le nom de modèle fourni.
-        # Cela permet de changer de provider via l'environnement sans toucher
-        # au code métier de la classe.
+        # Construction dynamique des composants.
         self.embeddings = self._build_embeddings(embedding_model)
         self.llm = self._build_llm(llm_model)
 
@@ -199,38 +196,32 @@ class RAGService:
         )
 
         # Prompt principal de génération.
-        # Il force le modèle à rester strictement fidèle au contexte documentaire.
+        # Cette version reste compacte mais réintroduit les contraintes
+        # de cardinalité afin de forcer le LLM à lister tous les événements
+        # présents dans le contexte final.
         self.prompt = ChatPromptTemplate.from_template(
             """
 Tu es un assistant spécialisé dans les événements culturels.
 
-Tu réponds uniquement à partir des documents fournis dans le contexte.
-Tu ne dois jamais inventer d'événement.
-
-L'historique récent sert uniquement à comprendre la continuité
-de la conversation.
-Les faits utilisés dans la réponse doivent toujours provenir
-du contexte documentaire.
-
-Consignes de réponse :
-- Si aucun document pertinent n'est disponible, réponds exactement :
+Règles :
+- Utilise uniquement le contexte fourni.
+- N'invente aucun événement.
+- Si le contexte est vide, réponds exactement :
   "Je n'ai trouvé aucun événement correspondant dans les données disponibles."
 
-- Les dates doivent toujours être sous la forme AAAA/MM/JJ.
-- Les intervalles de dates doivent toujours être sous la forme AAAA/MM/JJ au AAAA/MM/JJ.
-- Tu dois lister tous les événements présents dans le contexte final.
-- Tu ne dois en oublier aucun.
-- Chaque événement du contexte doit apparaître une seule fois dans la réponse.
-- Le nombre de lignes de la liste doit correspondre au nombre d'événements présents dans le contexte.
-
-- Si des documents pertinents sont disponibles, réponds toujours et uniquement sous la forme :
+Format obligatoire :
 Liste d'événements pour {question} :
 - Titre de l'événement (date : ..., lieu : ...)
 - Titre de l'événement (date : ..., lieu : ...)
 
-Tu ne dois pas ajouter d'introduction, de conclusion, ni de commentaire.
-Tu dois rester strictement fidèle au contexte.
-Tu ne dois jamais mentionner d'événement absent du contexte.
+Contraintes :
+- Dates au format AAAA/MM/JJ
+- Intervalles au format AAAA/MM/JJ au AAAA/MM/JJ
+- Tu dois lister tous les événements présents dans le contexte final
+- Tu ne dois en oublier aucun
+- Chaque événement du contexte doit apparaître une seule fois
+- Le nombre de lignes de la liste doit correspondre exactement au nombre d'événements présents dans le contexte final
+- Aucune introduction ni conclusion
 
 Historique récent :
 {history}
@@ -244,8 +235,8 @@ Contexte :
         )
 
         # Prompt de reformulation.
-        # Il sert à transformer une question dépendante de l'historique
-        # en question autonome avant le retrieval.
+        # Il n'est utilisé que si la question semble réellement dépendre
+        # de l'historique récent.
         self.rewrite_prompt = ChatPromptTemplate.from_template(
             """
 Tu reçois :
@@ -268,10 +259,8 @@ Question reformulée :
 """.strip()
         )
 
-        # Chaîne principale de génération de réponse.
+        # Chaînes LangChain.
         self.chain = self.prompt | self.llm | StrOutputParser()
-
-        # Chaîne secondaire de reformulation de question.
         self.rewrite_chain = self.rewrite_prompt | self.llm | StrOutputParser()
 
     # ------------------------------------------------------------------
@@ -281,32 +270,12 @@ Question reformulée :
     def _build_embeddings(self, model_name: str) -> Embeddings:
         """
         Construit l'objet d'embeddings adapté au modèle demandé.
-
-        Parameters
-        ----------
-        model_name : str
-            Nom du modèle d'embeddings.
-
-        Returns
-        -------
-        Embeddings
-            Instance d'embeddings compatible LangChain.
-
-        Raises
-        ------
-        ValueError
-            Si le modèle demandé n'est pas reconnu ou non supporté.
         """
-        # On normalise le nom pour simplifier la détection du provider.
         normalized = model_name.strip().lower()
 
-        # Cas Mistral.
         if normalized.startswith("mistral"):
             return MistralAIEmbeddings(model=model_name)
 
-        # Cas OpenAI embeddings.
-        # On accepte à la fois les noms explicites type "text-embedding-3-small"
-        # et une éventuelle convention interne commençant par "openai".
         if "text-embedding" in normalized or normalized.startswith("openai"):
             return OpenAIEmbeddings(model=model_name)
 
@@ -318,34 +287,15 @@ Question reformulée :
     def _build_llm(self, model_name: str) -> BaseChatModel:
         """
         Construit le LLM adapté au modèle demandé.
-
-        Parameters
-        ----------
-        model_name : str
-            Nom du modèle conversationnel / génératif.
-
-        Returns
-        -------
-        BaseChatModel
-            Instance de modèle de chat compatible LangChain.
-
-        Raises
-        ------
-        ValueError
-            Si le modèle demandé n'est pas reconnu ou non supporté.
         """
-        # Même logique que pour les embeddings :
-        # on choisit la bonne classe selon le provider détecté.
         normalized = model_name.strip().lower()
 
-        # Cas Mistral.
         if normalized.startswith("mistral"):
             return ChatMistralAI(
                 model=model_name,
                 temperature=0.2,
             )
 
-        # Cas OpenAI.
         if normalized.startswith("gpt") or normalized.startswith("openai"):
             return ChatOpenAI(
                 model=model_name,
@@ -377,7 +327,6 @@ Question reformulée :
         """
         Charge les documents si le corpus mémoire est vide.
         """
-        # Évite de recharger inutilement si le corpus est déjà présent.
         if self.documents:
             return
 
@@ -389,13 +338,7 @@ Question reformulée :
     def ensure_index_ready(self) -> None:
         """
         S'assure que l'index FAISS et le corpus documentaire sont prêts.
-
-        Stratégie :
-        - si le vectorstore est déjà chargé, on complète juste les documents
-        - sinon, on tente de charger l'index depuis le disque
-        - sinon, on construit un nouvel index à partir des documents
         """
-        # Fonction d'initialisation défensive du pipeline.
         if self.vectorstore is not None:
             self._ensure_documents_loaded()
             return
@@ -422,8 +365,6 @@ Question reformulée :
         Le `search_text` est privilégié car il est plus riche pour l'embedding
         que le `page_content` destiné au LLM.
         """
-        # On construit des documents dédiés à l'indexation vectorielle,
-        # distincts du format compact utilisé pour le LLM.
         docs_for_index: list[Document] = []
 
         for doc in docs:
@@ -446,9 +387,11 @@ Question reformulée :
     ) -> Any:
         """
         Exécute une fonction avec retry exponentiel sur erreur 429.
+
+        Ce helper est utilisé principalement pour les embeddings et la
+        construction d'index. Les appels LLM de rewrite / génération
+        sont gérés séparément avec un fallback métier.
         """
-        # Utile pour les appels liés aux embeddings
-        # lorsqu'une limitation de débit survient.
         for attempt in range(max_retries):
             try:
                 return func()
@@ -463,14 +406,7 @@ Question reformulée :
     def build_index(self) -> int:
         """
         Construit l'index FAISS global à partir du corpus documentaire.
-
-        Returns
-        -------
-        int
-            Nombre de documents indexés.
         """
-        # Construction par batch pour limiter la pression
-        # sur les embeddings et mieux gérer les retries.
         if not self.documents:
             raise ValueError(
                 "Impossible de construire l'index : aucun document n'est disponible."
@@ -510,8 +446,6 @@ Question reformulée :
         """
         Charge l'index FAISS depuis le disque.
         """
-        # Recharge un index existant au démarrage
-        # sans devoir recalculer les embeddings.
         if not self.index_dir.exists() or not any(self.index_dir.iterdir()):
             raise FileNotFoundError(
                 f"Index FAISS introuvable dans le dossier : {self.index_dir}"
@@ -527,8 +461,6 @@ Question reformulée :
         """
         Remplace le corpus courant puis reconstruit complètement l'index.
         """
-        # Utile après un refresh documentaire complet
-        # ou après un changement de modèle d'embeddings.
         self.set_documents(documents)
         return self.build_index()
 
@@ -536,9 +468,6 @@ Question reformulée :
         """
         Construit un FAISS local temporaire sur un sous-corpus filtré.
         """
-        # C'est un choix important de ton pipeline :
-        # au lieu d'interroger l'index global puis filtrer,
-        # tu recrées localement un petit index sur le sous-corpus retenu.
         docs_for_index = self._build_docs_for_vector_index(docs)
 
         return FAISS.from_documents(
@@ -576,13 +505,67 @@ Question reformulée :
             max_messages=max_messages,
         )
 
+    def _needs_rewrite(self, question: str) -> bool:
+        """
+        Détecte si la question semble dépendre de l'historique récent.
+
+        L'objectif est d'éviter un appel LLM de reformulation pour les
+        questions déjà autonomes, afin de réduire la latence, le coût
+        et le risque de 429 sur le modèle conversationnel.
+        """
+        q = (question or "").strip().lower()
+
+        if not q:
+            return False
+
+        short_followups = {
+            "et à sete ?",
+            "et à sète ?",
+            "et à montpellier ?",
+            "et pour les enfants ?",
+            "et les gratuites ?",
+            "et les payantes ?",
+            "et demain ?",
+            "et ce week-end ?",
+            "et ce weekend ?",
+        }
+
+        if q in short_followups:
+            return True
+
+        followup_markers = [
+            "et ",
+            "aussi ",
+            "sinon ",
+            "plutôt ",
+            "plutot ",
+            "dans ce cas ",
+            "pour les ",
+            "pour la ",
+            "pour le ",
+            "les gratuites",
+            "les payantes",
+            "demain",
+            "ce week-end",
+            "ce weekend",
+        ]
+
+        if len(q) < 35 and any(q.startswith(marker) for marker in followup_markers):
+            return True
+
+        pronouns = ["ceux", "celles", "ce type", "ça", "cela", "les mêmes", "les memes"]
+        if any(p in q for p in pronouns):
+            return True
+
+        return False
+
     def _rewrite_question_with_history(self, question: str, session_id: str) -> str:
         """
         Reformule la question à partir de l'historique récent si nécessaire.
+
+        En cas d'échec 429 sur le modèle, la question brute est conservée
+        afin de poursuivre le pipeline sans bloquer toute la requête.
         """
-        # Permet de transformer :
-        # "et à Sète ?" ou "et pour les enfants ?"
-        # en question autonome avant le retrieval.
         history = self._get_recent_history_text(
             session_id=session_id,
             max_messages=6,
@@ -591,14 +574,19 @@ Question reformulée :
         if not history:
             return question.strip()
 
-        rewritten = self.rewrite_chain.invoke(
-            {
-                "history": history,
-                "question": question,
-            }
-        ).strip()
-
-        return rewritten or question.strip()
+        try:
+            rewritten = self.rewrite_chain.invoke(
+                {
+                    "history": history,
+                    "question": question,
+                }
+            ).strip()
+            return rewritten or question.strip()
+        except Exception as exc:
+            message = str(exc)
+            if "429" in message:
+                return question.strip()
+            raise
 
     # ------------------------------------------------------------------
     # Sérialisation / debug
@@ -608,7 +596,6 @@ Question reformulée :
         """
         Convertit des objets potentiellement non sérialisables en JSON.
         """
-        # Sert surtout pour les traces et les réponses debug.
         if isinstance(value, (date, datetime)):
             return value.isoformat()
 
@@ -627,7 +614,6 @@ Question reformulée :
         """
         Réduit les informations de debug filtre à un format compact et sérialisable.
         """
-        # Évite de tracer des objets trop lourds ou non JSON-compatibles.
         if debug_data is None:
             return None
 
@@ -693,8 +679,6 @@ Question reformulée :
         """
         Enregistre une trace complète du pipeline pour analyse ultérieure.
         """
-        # Cette trace sert à comprendre précisément
-        # ce qui s'est passé à chaque étape du pipeline.
         payload = {
             "question": question,
             "effective_question": effective_question,
@@ -726,14 +710,17 @@ Question reformulée :
 
         self.trace_service.write_trace(self._serialize_for_json(payload))
 
-    def _render_generation_prompt(
+    def _build_generation_prompt_text(
         self,
         question: str,
         context: str,
         history: str,
     ) -> str:
         """
-        Rend le prompt final de génération tel qu'envoyé au LLM.
+        Rend le prompt final de génération tel qu'il est construit.
+
+        Cette méthode ne déclenche aucun appel LLM. Elle sert uniquement
+        à produire une version texte du prompt pour la traçabilité.
         """
         prompt_value = self.prompt.invoke(
             {
@@ -748,13 +735,16 @@ Question reformulée :
         except Exception:
             return str(prompt_value)
 
-    def _render_rewrite_prompt(
+    def _build_rewrite_prompt_text(
         self,
         question: str,
         history: str,
     ) -> str:
         """
-        Rend le prompt de reformulation tel qu'envoyé au LLM.
+        Rend le prompt de reformulation tel qu'il est construit.
+
+        Cette méthode ne déclenche aucun appel LLM. Elle sert uniquement
+        à produire une version texte du prompt pour la traçabilité.
         """
         prompt_value = self.rewrite_prompt.invoke(
             {
@@ -767,7 +757,7 @@ Question reformulée :
             return prompt_value.to_string()
         except Exception:
             return str(prompt_value)
-        
+
     # ------------------------------------------------------------------
     # Retrieval interne
     # ------------------------------------------------------------------
@@ -779,8 +769,6 @@ Question reformulée :
         """
         Injecte les scores vectoriels dans les métadonnées des documents.
         """
-        # Permet au RetrievalService de réutiliser ensuite
-        # le signal vectoriel dans son score hybride.
         docs: list[Document] = []
 
         for doc, score in results:
@@ -796,8 +784,6 @@ Question reformulée :
         """
         Vérifie qu'un document semble suffisamment fiable pour la réponse finale.
         """
-        # Sert de garde-fou final :
-        # on évite de répondre avec des documents trop incomplets.
         md = doc.metadata or {}
 
         has_title = bool(md.get("title"))
@@ -817,7 +803,6 @@ Question reformulée :
         """
         Retient les documents fiables après ranking.
         """
-        # Dernier tamis avant génération.
         if not docs:
             return []
 
@@ -832,8 +817,6 @@ Question reformulée :
         """
         Lance la recherche vectorielle sur le sous-corpus préfiltré.
         """
-        # Point clé de ton architecture :
-        # retrieval local sur le sous-corpus candidat, pas sur tout l'index global.
         if not candidate_docs:
             return []
 
@@ -852,11 +835,7 @@ Question reformulée :
     def _build_relaxed_question(self, question: str) -> str:
         """
         Construit une version relâchée de la question pour le fallback.
-
-        Actuellement, la version relâchée est identique à la question.
         """
-        # Point d'extension futur :
-        # ici on pourrait simplifier la requête pour un fallback plus sophistiqué.
         return question.strip()
 
     def _prefilter_with_fallback(
@@ -869,9 +848,6 @@ Question reformulée :
         Retourne `fallback_used=True` uniquement si le fallback a réellement
         permis de récupérer des documents.
         """
-        # Étape importante du pipeline :
-        # on tente d'abord un préfiltrage strict avec ville par défaut,
-        # puis un fallback plus souple si cela vide tout.
         filter_debug = self.filter_service.filter_documents_with_debug(
             question=question,
             docs=self.documents,
@@ -903,7 +879,6 @@ Question reformulée :
         """
         Retourne directement les documents finaux retenus par le pipeline.
         """
-        # API simple orientée retrieval seul.
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
 
@@ -916,10 +891,48 @@ Question reformulée :
 
     def format_doc(self, doc: Document, index: int | None = None) -> str:
         """
-        Formate un document en fiche courte lisible par le LLM.
+        Formate un document en fiche compacte lisible par le LLM.
+
+        Cette représentation est optimisée pour réduire les tokens :
+        - description tronquée plus court
+        - URL exclue du contexte LLM
+        - seules les informations utiles à la génération sont conservées
         """
-        # Version compacte et structurée du document,
-        # distincte du search_text utilisé pour le retrieval.
+        md = doc.metadata or {}
+
+        lines: list[str] = []
+
+        if index is not None:
+            lines.append(f"Événement {index}")
+
+        description = (md.get("description", "") or "")[:180]
+
+        lines.extend(
+            [
+                f"Titre : {md.get('title', '')}",
+                f"Lieu : {md.get('location_name', '')}",
+                f"Ville : {md.get('city', '')}",
+                f"Région : {md.get('region', '')}",
+                f"Date de début : {md.get('first_date', '')}",
+                f"Date de fin : {md.get('last_date', '')}",
+                f"Type : {md.get('canonical_event_type', '') or md.get('event_type', '')}",
+                f"Genre musical : {md.get('music_genre', '')}",
+                f"Tarification : {md.get('price_info', '')}",
+                f"Description : {description}",
+            ]
+        )
+
+        return "\n".join(lines)
+
+    def format_doc_debug(self, doc: Document, index: int | None = None) -> str:
+        """
+        Formate un document en fiche détaillée pour le debug / l'affichage.
+
+        Cette représentation est plus riche que celle utilisée pour le LLM :
+        - description plus longue
+        - URL conservée
+        - adaptée à l'analyse humaine du pipeline
+        """
         md = doc.metadata or {}
 
         lines: list[str] = []
@@ -949,7 +962,9 @@ Question reformulée :
 
     def format_docs(self, docs: list[Document]) -> str:
         """
-        Concatène plusieurs documents formatés en un seul contexte texte.
+        Concatène plusieurs documents compacts en un seul contexte texte.
+
+        Cette méthode est destinée au contexte envoyé au LLM.
         """
         if not docs:
             return ""
@@ -961,13 +976,31 @@ Question reformulée :
 
     def format_docs_list(self, docs: list[Document]) -> list[str]:
         """
-        Retourne la liste des fiches formatées, une par document.
+        Retourne la liste des fiches compactes, une par document.
+
+        Cette méthode peut servir lorsque l'on souhaite inspecter la version
+        strictement envoyée au LLM.
         """
         if not docs:
             return []
 
         return [
             self.format_doc(doc, idx)
+            for idx, doc in enumerate(docs, start=1)
+        ]
+
+    def format_docs_list_debug(self, docs: list[Document]) -> list[str]:
+        """
+        Retourne la liste des fiches détaillées, une par document.
+
+        Cette méthode est destinée à l'affichage debug / utilisateur
+        afin de conserver plus d'informations que dans le contexte LLM.
+        """
+        if not docs:
+            return []
+
+        return [
+            self.format_doc_debug(doc, idx)
             for idx, doc in enumerate(docs, start=1)
         ]
 
@@ -1023,9 +1056,10 @@ Question reformulée :
     ) -> str:
         """
         Génère la réponse finale du LLM à partir du contexte documentaire.
+
+        En cas de 429 sur le modèle, une réponse de dégradation contrôlée
+        est renvoyée afin d'éviter un 500 serveur brut.
         """
-        # Si aucun document exploitable n'est présent,
-        # on renvoie directement la réponse vide standard.
         if not docs:
             return self.EMPTY_ANSWER
 
@@ -1038,16 +1072,21 @@ Question reformulée :
             max_messages=6,
         )
 
-        answer = self.chain.invoke(
-            {
-                "question": question,
-                "context": context,
-                "history": history,
-            }
-        )
-        answer = answer.strip()
-
-        return answer or self.EMPTY_ANSWER
+        try:
+            answer = self.chain.invoke(
+                {
+                    "question": question,
+                    "context": context,
+                    "history": history,
+                }
+            )
+            answer = answer.strip()
+            return answer or self.EMPTY_ANSWER
+        except Exception as exc:
+            message = str(exc)
+            if "429" in message:
+                return self.TEMPORARY_LLM_UNAVAILABLE_ANSWER
+            raise
 
     # ------------------------------------------------------------------
     # Pipeline complet
@@ -1057,15 +1096,24 @@ Question reformulée :
         """
         Exécute le pipeline complet de bout en bout.
         """
-        # Cœur orchestral du service.
-        # C'est ici que toutes les briques s'enchaînent dans le bon ordre.
         if not question or not question.strip():
             raise ValueError("La question utilisateur ne peut pas être vide.")
 
         self.ensure_index_ready()
 
-        # Reformulation contextuelle si nécessaire.
-        effective_question = self._rewrite_question_with_history(question, session_id)
+        # Historique récupéré une seule fois au début du pipeline.
+        # Il sert à décider si un rewrite est réellement utile.
+        history_text = self._get_recent_history_text(
+            session_id=session_id,
+            max_messages=6,
+        )
+
+        # Reformulation conditionnelle.
+        # On évite un second appel LLM si la question est déjà autonome.
+        if history_text and self._needs_rewrite(question):
+            effective_question = self._rewrite_question_with_history(question, session_id)
+        else:
+            effective_question = question.strip()
 
         # Préfiltrage structuré + fallback éventuel.
         filter_debug, fallback_filter_debug, prefiltered_docs, fallback_used = (
@@ -1077,58 +1125,56 @@ Question reformulée :
         final_docs: list[Document] = []
 
         if prefiltered_docs:
-            # Recherche vectorielle locale sur le sous-corpus retenu.
             raw_docs = self._run_vector_retrieval(
                 question=effective_question,
                 candidate_docs=prefiltered_docs,
             )
 
             if raw_docs:
-                # Ranking métier hybride sur les documents candidats.
                 ranked_docs = self.retrieval_service.rank_documents(
                     question=effective_question,
                     raw_docs=raw_docs,
                     top_k=min(self.top_k_retrieval, len(raw_docs)),
                 )
 
-                # Contrôle final de fiabilité documentaire.
                 final_docs = self._post_filter_ranked_docs(ranked_docs)
 
-        # Construction du contexte, génération, conversion API.
+        # Construction du contexte final pour le LLM.
         context = self.format_docs(final_docs)
 
-        history_text_before_generation = self._get_recent_history_text(
-            session_id=session_id,
-            max_messages=6,
-        )
-
+        # Prompt de rewrite tracé seulement si un vrai historique existe
+        # et si la logique de rewrite est potentiellement activable.
         rewrite_prompt_rendered = None
-        if history_text_before_generation:
-            rewrite_prompt_rendered = self._render_rewrite_prompt(
+        if history_text and self._needs_rewrite(question):
+            rewrite_prompt_rendered = self._build_rewrite_prompt_text(
                 question=question,
-                history=history_text_before_generation,
+                history=history_text,
             )
 
+        # Génération finale.
         answer = self.generate_answer(question, final_docs, session_id)
         retrieved_documents = self.build_retrieved_documents(final_docs)
-        retrieved_contexts = self.format_docs_list(final_docs)
 
+        # Pour l'affichage debug / utilisateur, on conserve une version détaillée
+        # des documents finaux afin de ne pas perdre d'informations utiles.
+        retrieved_contexts = self.format_docs_list_debug(final_docs)
+
+        # Prompt de génération tracé seulement si des documents finaux existent.
         generation_prompt = None
         if final_docs:
-            generation_prompt = self._render_generation_prompt(
+            generation_prompt = self._build_generation_prompt_text(
                 question=question,
                 context=context,
-                history=history_text_before_generation,
+                history=history_text,
             )
 
-        # Variante détaillée du ranking pour le debug.
         retrieval_debug = self.retrieval_service.rank_documents_with_scores(
             question=effective_question,
             raw_docs=raw_docs,
             top_k=len(raw_docs) if raw_docs else self.top_k_final,
         )
 
-        # Mise à jour de la mémoire courte après réponse.
+        # Mise à jour de la mémoire courte après la réponse.
         self.memory_service.append_turn(
             session_id=session_id,
             user_message=question,
@@ -1140,7 +1186,7 @@ Question reformulée :
             max_messages=6,
         )
 
-        # Écriture de la trace complète.
+        # Traçage complet.
         self._trace_pipeline(
             question=question,
             effective_question=effective_question,
