@@ -687,6 +687,8 @@ Question reformulée :
         context: str,
         answer: str,
         fallback_used: bool,
+        generation_prompt: str | None = None,
+        rewrite_prompt_rendered: str | None = None,
     ) -> None:
         """
         Enregistre une trace complète du pipeline pour analyse ultérieure.
@@ -717,11 +719,55 @@ Question reformulée :
             "ranked_docs": [self._doc_to_trace_row(doc) for doc in ranked_docs[:50]],
             "final_docs": [self._doc_to_trace_row(doc) for doc in final_docs[:50]],
             "context": context,
+            "generation_prompt": generation_prompt,
+            "rewrite_prompt": rewrite_prompt_rendered,
             "answer": answer,
         }
 
         self.trace_service.write_trace(self._serialize_for_json(payload))
 
+    def _render_generation_prompt(
+        self,
+        question: str,
+        context: str,
+        history: str,
+    ) -> str:
+        """
+        Rend le prompt final de génération tel qu'envoyé au LLM.
+        """
+        prompt_value = self.prompt.invoke(
+            {
+                "question": question,
+                "context": context,
+                "history": history,
+            }
+        )
+
+        try:
+            return prompt_value.to_string()
+        except Exception:
+            return str(prompt_value)
+
+    def _render_rewrite_prompt(
+        self,
+        question: str,
+        history: str,
+    ) -> str:
+        """
+        Rend le prompt de reformulation tel qu'envoyé au LLM.
+        """
+        prompt_value = self.rewrite_prompt.invoke(
+            {
+                "question": question,
+                "history": history,
+            }
+        )
+
+        try:
+            return prompt_value.to_string()
+        except Exception:
+            return str(prompt_value)
+        
     # ------------------------------------------------------------------
     # Retrieval interne
     # ------------------------------------------------------------------
@@ -1050,9 +1096,30 @@ Question reformulée :
 
         # Construction du contexte, génération, conversion API.
         context = self.format_docs(final_docs)
+
+        history_text_before_generation = self._get_recent_history_text(
+            session_id=session_id,
+            max_messages=6,
+        )
+
+        rewrite_prompt_rendered = None
+        if history_text_before_generation:
+            rewrite_prompt_rendered = self._render_rewrite_prompt(
+                question=question,
+                history=history_text_before_generation,
+            )
+
         answer = self.generate_answer(question, final_docs, session_id)
         retrieved_documents = self.build_retrieved_documents(final_docs)
         retrieved_contexts = self.format_docs_list(final_docs)
+
+        generation_prompt = None
+        if final_docs:
+            generation_prompt = self._render_generation_prompt(
+                question=question,
+                context=context,
+                history=history_text_before_generation,
+            )
 
         # Variante détaillée du ranking pour le debug.
         retrieval_debug = self.retrieval_service.rank_documents_with_scores(
@@ -1088,6 +1155,8 @@ Question reformulée :
             context=context,
             answer=answer,
             fallback_used=fallback_used,
+            generation_prompt=generation_prompt,
+            rewrite_prompt_rendered=rewrite_prompt_rendered,
         )
 
         return {

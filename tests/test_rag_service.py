@@ -13,6 +13,7 @@ from app.rag_service import RAGService
 # Fakes
 # -------------------------------------------------------------------------
 
+
 class FakeEmbeddings:
     def __init__(self, *args, **kwargs):
         pass
@@ -168,6 +169,7 @@ class FakeMemoryService:
 # Fixtures
 # -------------------------------------------------------------------------
 
+
 @pytest.fixture
 def sample_documents():
     return [
@@ -241,6 +243,7 @@ def patched_rag(monkeypatch):
 # Base
 # -------------------------------------------------------------------------
 
+
 def test_set_documents(patched_rag, sample_documents):
     rag = RAGService()
     rag.set_documents(sample_documents)
@@ -257,6 +260,7 @@ def test_is_index_loaded_false_by_default(patched_rag):
 # -------------------------------------------------------------------------
 # Construction / chargement index
 # -------------------------------------------------------------------------
+
 
 def test_build_index(patched_rag, sample_documents):
     rag = RAGService(documents=sample_documents)
@@ -345,6 +349,7 @@ def test_ensure_index_ready_raises_when_no_documents_loaded(patched_rag, monkeyp
 # Retry
 # -------------------------------------------------------------------------
 
+
 def test_execute_with_retry_retries_after_429_then_succeeds(patched_rag):
     rag = RAGService()
     state = {"count": 0}
@@ -392,6 +397,7 @@ def test_execute_with_retry_raises_immediately_for_non_429_error(patched_rag):
 # -------------------------------------------------------------------------
 # Helpers index / retrieval
 # -------------------------------------------------------------------------
+
 
 def test_build_docs_for_vector_index_uses_search_text(patched_rag, sample_documents):
     rag = RAGService()
@@ -490,6 +496,7 @@ def test_post_filter_ranked_docs_falls_back_to_original_docs_when_none_are_relia
 # Mémoire conversationnelle
 # -------------------------------------------------------------------------
 
+
 def test_get_recent_history_text_strips_memory_text(patched_rag):
     rag = RAGService()
     rag.memory_service.history_text = "  Utilisateur : bonjour  "
@@ -549,6 +556,7 @@ def test_rewrite_question_with_history_returns_original_when_rewrite_chain_retur
 # Sérialisation / debug
 # -------------------------------------------------------------------------
 
+
 def test_serialize_for_json_handles_nested_dates_and_sets(patched_rag):
     rag = RAGService()
 
@@ -598,6 +606,7 @@ def test_sanitize_filter_debug_returns_expected_shape(patched_rag):
 # Trace helpers
 # -------------------------------------------------------------------------
 
+
 def test_doc_to_trace_row_returns_expected_fields(patched_rag, sample_documents):
     rag = RAGService()
 
@@ -630,6 +639,8 @@ def test_trace_pipeline_writes_serialized_payload(patched_rag, sample_documents)
         context="Contexte test",
         answer="Réponse test",
         fallback_used=False,
+        generation_prompt="Prompt génération test",
+        rewrite_prompt_rendered="Prompt rewrite test",
     )
 
     assert len(rag.trace_service.payloads) == 1
@@ -639,11 +650,47 @@ def test_trace_pipeline_writes_serialized_payload(patched_rag, sample_documents)
     assert payload["session_id"] == "session-1"
     assert payload["history"] == [{"role": "user", "content": "Bonjour"}]
     assert payload["answer"] == "Réponse test"
+    assert payload["generation_prompt"] == "Prompt génération test"
+    assert payload["rewrite_prompt"] == "Prompt rewrite test"
+
+
+# -------------------------------------------------------------------------
+# Render prompts
+# -------------------------------------------------------------------------
+
+
+def test_render_generation_prompt_returns_string(patched_rag, sample_documents):
+    rag = RAGService()
+
+    result = rag._render_generation_prompt(
+        question="Je cherche une exposition",
+        context=rag.format_docs(sample_documents[:1]),
+        history="Utilisateur : Bonjour",
+    )
+
+    assert isinstance(result, str)
+    assert "Je cherche une exposition" in result
+    assert "Utilisateur : Bonjour" in result
+    assert "Expo Archi" in result
+
+
+def test_render_rewrite_prompt_returns_string(patched_rag):
+    rag = RAGService()
+
+    result = rag._render_rewrite_prompt(
+        question="Et les gratuites ?",
+        history="Utilisateur : Je cherche une exposition à Montpellier",
+    )
+
+    assert isinstance(result, str)
+    assert "Et les gratuites ?" in result
+    assert "Montpellier" in result
 
 
 # -------------------------------------------------------------------------
 # Retrieval
 # -------------------------------------------------------------------------
+
 
 def test_retrieve_empty_question_raises(patched_rag):
     rag = RAGService()
@@ -769,6 +816,7 @@ def test_prefilter_with_fallback_uses_fallback_when_main_empty(patched_rag, samp
 # Formatage
 # -------------------------------------------------------------------------
 
+
 def test_format_doc_returns_structured_text(patched_rag, sample_documents):
     rag = RAGService()
 
@@ -813,6 +861,7 @@ def test_format_docs_list_returns_list(patched_rag, sample_documents):
 # Conversion API
 # -------------------------------------------------------------------------
 
+
 def test_build_retrieved_document(patched_rag, sample_documents):
     rag = RAGService()
 
@@ -839,6 +888,7 @@ def test_build_retrieved_documents_returns_list(patched_rag, sample_documents):
 # -------------------------------------------------------------------------
 # Génération
 # -------------------------------------------------------------------------
+
 
 def test_generate_answer_returns_empty_answer_when_no_docs(patched_rag):
     rag = RAGService()
@@ -889,6 +939,7 @@ def test_generate_answer_returns_empty_answer_when_chain_returns_blank(
 # -------------------------------------------------------------------------
 # Pipeline complet
 # -------------------------------------------------------------------------
+
 
 def test_ask_empty_question_raises(patched_rag):
     rag = RAGService()
@@ -964,6 +1015,10 @@ def test_run_pipeline_success(patched_rag, sample_documents, monkeypatch):
     assert result["fallback_used"] is False
     assert len(rag.trace_service.payloads) == 1
 
+    trace_payload = rag.trace_service.payloads[0]
+    assert "generation_prompt" in trace_payload
+    assert "rewrite_prompt" in trace_payload
+
 
 def test_run_pipeline_appends_turn_to_memory(patched_rag, sample_documents, monkeypatch):
     rag = RAGService(documents=sample_documents, top_k_retrieval=1, top_k_final=1)
@@ -992,6 +1047,69 @@ def test_run_pipeline_appends_turn_to_memory(patched_rag, sample_documents, monk
     assert rag.memory_service.messages[0]["content"] == "Je cherche une exposition"
     assert rag.memory_service.messages[1]["role"] == "assistant"
     assert rag.memory_service.messages[1]["content"] == "Réponse pipeline"
+
+
+def test_run_pipeline_traces_prompt_with_history_before_append_turn(
+    patched_rag, sample_documents, monkeypatch
+):
+    rag = RAGService(documents=sample_documents, top_k_retrieval=1, top_k_final=1)
+    rag.chain = CapturingChain("Réponse pipeline")
+    rag.filter_service = FakeFilterService(docs=sample_documents)
+    rag.retrieval_service = FakeRetrievalService(ranked_docs=[sample_documents[0]])
+    rag.trace_service = FakeTraceService()
+    rag.memory_service = FakeMemoryService()
+    rag.memory_service.history_text = "Utilisateur : ancien message"
+    rag.vectorstore = FakeVectorStore()
+
+    monkeypatch.setattr(
+        rag,
+        "_build_local_vectorstore",
+        lambda docs: FakeVectorStore(results_with_scores=[(sample_documents[0], 0.15)]),
+    )
+    monkeypatch.setattr(
+        rag,
+        "_rewrite_question_with_history",
+        lambda question, session_id="default": question,
+    )
+
+    rag._run_pipeline("Je cherche une exposition", session_id="session-99")
+
+    assert len(rag.trace_service.payloads) == 1
+    payload = rag.trace_service.payloads[0]
+
+    assert payload["generation_prompt"] is not None
+    assert "Utilisateur : ancien message" in payload["generation_prompt"]
+    assert "Réponse pipeline" not in payload["generation_prompt"]
+
+
+def test_run_pipeline_trace_has_no_generation_prompt_when_no_final_docs(
+    patched_rag, sample_documents, monkeypatch
+):
+    rag = RAGService(documents=sample_documents)
+    rag.trace_service = FakeTraceService()
+    rag.memory_service = FakeMemoryService()
+    rag.vectorstore = FakeVectorStore()
+
+    monkeypatch.setattr(
+        rag,
+        "_rewrite_question_with_history",
+        lambda question, session_id="default": question,
+    )
+    monkeypatch.setattr(
+        rag,
+        "_prefilter_with_fallback",
+        lambda question: (
+            {"filters": {}, "n_input_docs": 2, "docs": []},
+            None,
+            [],
+            False,
+        ),
+    )
+
+    rag._run_pipeline("Je cherche une exposition", session_id="session-1")
+
+    payload = rag.trace_service.payloads[0]
+    assert payload["generation_prompt"] is None
 
 
 def test_ask_returns_ask_response(patched_rag, sample_documents, monkeypatch):
@@ -1036,7 +1154,7 @@ def test_ask_debug_returns_debug_payload(patched_rag, sample_documents, monkeypa
             "fallback_used": False,
             "filter_debug": {"filters": {}, "n_input_docs": 2},
             "fallback_filter_debug": None,
-            "retrieval_debug": {"rows": [{"title": "Expo Archi", "final_score": 0.8}]},
+            "retrieval_debug": [{"title": "Expo Archi", "final_score": 0.8}],
         },
     )
 
@@ -1053,9 +1171,12 @@ def test_ask_debug_returns_debug_payload(patched_rag, sample_documents, monkeypa
     assert response["fallback_used"] is False
     assert "filter_debug" in response
     assert "retrieval_debug" in response
+    assert response["retrieval_debug"][0]["title"] == "Expo Archi"
 
 
-def test_ask_debug_includes_fallback_filter_debug_when_present(patched_rag, sample_documents, monkeypatch):
+def test_ask_debug_includes_fallback_filter_debug_when_present(
+    patched_rag, sample_documents, monkeypatch
+):
     rag = RAGService()
 
     monkeypatch.setattr(
@@ -1073,7 +1194,7 @@ def test_ask_debug_includes_fallback_filter_debug_when_present(patched_rag, samp
             "fallback_used": True,
             "filter_debug": {"filters": {}, "n_input_docs": 2},
             "fallback_filter_debug": {"filters": {"fallback": True}, "n_input_docs": 2},
-            "retrieval_debug": {"rows": [{"title": "Expo Archi"}]},
+            "retrieval_debug": [{"title": "Expo Archi"}],
         },
     )
 
@@ -1082,3 +1203,4 @@ def test_ask_debug_includes_fallback_filter_debug_when_present(patched_rag, samp
     assert response["fallback_used"] is True
     assert "fallback_filter_debug" in response
     assert response["fallback_filter_debug"]["filters"]["fallback"] is True
+    assert response["retrieval_debug"][0]["title"] == "Expo Archi"
