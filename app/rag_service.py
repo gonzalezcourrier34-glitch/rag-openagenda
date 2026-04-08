@@ -63,7 +63,6 @@ La mémoire courte sert uniquement à :
 Les faits utilisés dans la réponse finale doivent toujours provenir
 des documents récupérés dans le contexte, jamais de l'historique seul.
 """
-
 from __future__ import annotations
 
 import time
@@ -73,11 +72,20 @@ from typing import Any, Callable
 
 from langchain_community.vectorstores import FAISS
 from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_mistralai import ChatMistralAI, MistralAIEmbeddings
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings
 
-from app.config import DEFAULT_SCOPE, DEFAULT_ZONE, FAISS_INDEX_DIR
+from app.config import (
+    DEFAULT_SCOPE,
+    DEFAULT_ZONE,
+    EMBEDDING_MODEL,
+    FAISS_INDEX_DIR,
+    LLM_MODEL,
+)
 from app.document_service import load_documents
 from app.filter_service import FilterService
 from app.memory_service import MemoryService
@@ -105,6 +113,10 @@ class RAGService:
 
     Le service ne porte pas la logique métier détaillée du filtrage
     ou du scoring. Il pilote uniquement le flux global.
+
+    Les modèles d'embeddings et de génération sont configurables via
+    des variables d'environnement afin de permettre un changement
+    de provider sans modifier le code métier.
     """
     # Cette classe ne fait pas "tout toute seule".
     # Elle orchestre les briques spécialisées :
@@ -117,8 +129,8 @@ class RAGService:
         self,
         documents: list[Document] | None = None,
         index_dir: str | Path | None = None,
-        embedding_model: str = "mistral-embed",
-        llm_model: str = "mistral-small-latest",
+        embedding_model: str = EMBEDDING_MODEL,
+        llm_model: str = LLM_MODEL,
         top_k_retrieval: int = 10,
         top_k_final: int = 3,
         zone: str = DEFAULT_ZONE,
@@ -126,6 +138,34 @@ class RAGService:
         trace_enabled: bool = True,
         trace_file: str | Path = "artifacts/rag_trace.jsonl",
     ) -> None:
+        """
+        Initialise le service RAG et ses dépendances principales.
+
+        Parameters
+        ----------
+        documents : list[Document] | None
+            Corpus documentaire déjà chargé en mémoire, si disponible.
+        index_dir : str | Path | None
+            Répertoire contenant l'index FAISS global.
+        embedding_model : str
+            Nom du modèle d'embeddings à utiliser.
+            Peut provenir des variables d'environnement.
+        llm_model : str
+            Nom du modèle de génération / reformulation à utiliser.
+            Peut provenir des variables d'environnement.
+        top_k_retrieval : int
+            Nombre maximal de documents candidats retenus après retrieval vectoriel.
+        top_k_final : int
+            Nombre maximal de documents conservés pour la réponse finale.
+        zone : str
+            Zone par défaut utilisée dans le préfiltrage.
+        scope : str
+            Niveau de portée géographique par défaut.
+        trace_enabled : bool
+            Active ou non l'écriture des traces JSONL.
+        trace_file : str | Path
+            Fichier de sortie des traces.
+        """
         # Paramètres généraux du pipeline :
         # corpus, index, embeddings, LLM, zone, scope, tailles de top-k.
         self.documents = documents or []
@@ -135,15 +175,16 @@ class RAGService:
         self.zone = zone
         self.scope = scope
 
-        # Modèle d'embeddings utilisé pour vectoriser les documents
-        # et construire / interroger l'index.
-        self.embeddings = MistralAIEmbeddings(model=embedding_model)
+        # On mémorise explicitement les noms de modèles afin de pouvoir
+        # les tracer et les afficher en debug.
+        self.embedding_model_name = embedding_model
+        self.llm_model_name = llm_model
 
-        # LLM de génération et de reformulation.
-        self.llm = ChatMistralAI(
-            model=llm_model,
-            temperature=0.2,
-        )
+        # Construction dynamique des composants selon le nom de modèle fourni.
+        # Cela permet de changer de provider via l'environnement sans toucher
+        # au code métier de la classe.
+        self.embeddings = self._build_embeddings(embedding_model)
+        self.llm = self._build_llm(llm_model)
 
         # Vectorstore FAISS global chargé en mémoire.
         self.vectorstore: FAISS | None = None
@@ -234,15 +275,102 @@ Question reformulée :
         self.rewrite_chain = self.rewrite_prompt | self.llm | StrOutputParser()
 
     # ------------------------------------------------------------------
+    # Construction dynamique des modèles
+    # ------------------------------------------------------------------
+
+    def _build_embeddings(self, model_name: str) -> Embeddings:
+        """
+        Construit l'objet d'embeddings adapté au modèle demandé.
+
+        Parameters
+        ----------
+        model_name : str
+            Nom du modèle d'embeddings.
+
+        Returns
+        -------
+        Embeddings
+            Instance d'embeddings compatible LangChain.
+
+        Raises
+        ------
+        ValueError
+            Si le modèle demandé n'est pas reconnu ou non supporté.
+        """
+        # On normalise le nom pour simplifier la détection du provider.
+        normalized = model_name.strip().lower()
+
+        # Cas Mistral.
+        if normalized.startswith("mistral"):
+            return MistralAIEmbeddings(model=model_name)
+
+        # Cas OpenAI embeddings.
+        # On accepte à la fois les noms explicites type "text-embedding-3-small"
+        # et une éventuelle convention interne commençant par "openai".
+        if "text-embedding" in normalized or normalized.startswith("openai"):
+            return OpenAIEmbeddings(model=model_name)
+
+        raise ValueError(
+            f"Embedding model non supporté : {model_name}. "
+            "Valeurs attendues : ex. 'mistral-embed' ou 'text-embedding-3-small'."
+        )
+
+    def _build_llm(self, model_name: str) -> BaseChatModel:
+        """
+        Construit le LLM adapté au modèle demandé.
+
+        Parameters
+        ----------
+        model_name : str
+            Nom du modèle conversationnel / génératif.
+
+        Returns
+        -------
+        BaseChatModel
+            Instance de modèle de chat compatible LangChain.
+
+        Raises
+        ------
+        ValueError
+            Si le modèle demandé n'est pas reconnu ou non supporté.
+        """
+        # Même logique que pour les embeddings :
+        # on choisit la bonne classe selon le provider détecté.
+        normalized = model_name.strip().lower()
+
+        # Cas Mistral.
+        if normalized.startswith("mistral"):
+            return ChatMistralAI(
+                model=model_name,
+                temperature=0.2,
+            )
+
+        # Cas OpenAI.
+        if normalized.startswith("gpt") or normalized.startswith("openai"):
+            return ChatOpenAI(
+                model=model_name,
+                temperature=0.2,
+            )
+
+        raise ValueError(
+            f"LLM model non supporté : {model_name}. "
+            "Valeurs attendues : ex. 'mistral-small-latest' ou 'gpt-4o-mini'."
+        )
+
+    # ------------------------------------------------------------------
     # Gestion de l'index et des documents
     # ------------------------------------------------------------------
 
     def is_index_loaded(self) -> bool:
-        # Indique si un vectorstore FAISS est déjà chargé en mémoire.
+        """
+        Indique si le vectorstore FAISS global est déjà chargé en mémoire.
+        """
         return self.vectorstore is not None
 
     def set_documents(self, documents: list[Document]) -> None:
-        # Permet d'injecter explicitement une nouvelle liste de documents.
+        """
+        Injecte explicitement une nouvelle liste de documents dans le service.
+        """
         self.documents = documents
 
     def _ensure_documents_loaded(self) -> None:
@@ -399,7 +527,8 @@ Question reformulée :
         """
         Remplace le corpus courant puis reconstruit complètement l'index.
         """
-        # Utile après un refresh documentaire complet.
+        # Utile après un refresh documentaire complet
+        # ou après un changement de modèle d'embeddings.
         self.set_documents(documents)
         return self.build_index()
 
@@ -571,6 +700,8 @@ Question reformulée :
             "history": history,
             "zone": self.zone,
             "scope": self.scope,
+            "embedding_model": self.embedding_model_name,
+            "llm_model": self.llm_model_name,
             "top_k_retrieval": self.top_k_retrieval,
             "top_k_final": self.top_k_final,
             "fallback_used": fallback_used,
@@ -750,6 +881,8 @@ Question reformulée :
         if index is not None:
             lines.append(f"Événement {index}")
 
+        description = (md.get("description", "") or "")[:500]
+
         lines.extend(
             [
                 f"Titre : {md.get('title', '')}",
@@ -761,7 +894,7 @@ Question reformulée :
                 f"Type : {md.get('canonical_event_type', '') or md.get('event_type', '')}",
                 f"Genre musical : {md.get('music_genre', '')}",
                 f"Tarification : {md.get('price_info', '')}",
-                f"Description : {md.get('description', '')}",
+                f"Description : {description}",
                 f"URL : {md.get('source_url', '') or md.get('url', '')}",
             ]
         )

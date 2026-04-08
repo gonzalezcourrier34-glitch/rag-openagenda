@@ -71,6 +71,10 @@ OPENAGENDA_API_KEY = os.getenv("OPENAGENDA_API_KEY", "")
 # URL de la base de données
 DATABASE_URL = os.getenv("DATABASE_URL", "")
 
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "mistral-embed")
+
+LLM_MODEL = os.getenv("LLM_MODEL", "mistral-small-latest")
+
 # URL MLflow
 MLFLOW_TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI", "http://mlflow:5000")
 
