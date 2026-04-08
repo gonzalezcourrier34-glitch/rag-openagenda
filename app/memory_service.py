@@ -20,6 +20,9 @@ from typing import Any
 
 
 class MemoryService:
+    # Service de mémoire courte conversationnelle.
+    # Son rôle est de conserver quelques échanges récents
+    # pour maintenir le contexte d'une conversation en cours.
     ALLOWED_ROLES = {"user", "assistant"}
 
     def __init__(
@@ -41,6 +44,8 @@ class MemoryService:
             Nombre maximal de tours conservés par session.
             Un tour = 1 message utilisateur + 1 message assistant.
         """
+        # Configure l'emplacement du stockage local
+        # et la taille maximale de la fenêtre mémoire.
         self.memory_dir = Path(memory_dir)
         self.memory_file = self.memory_dir / memory_file
         self.max_turns = max(1, int(max_turns))
@@ -56,6 +61,8 @@ class MemoryService:
         """
         Réinitialise complètement la mémoire au démarrage de l'API.
         """
+        # Vide entièrement le stockage mémoire.
+        # Utile si l'on veut repartir d'un état propre au lancement.
         self._write_data({})
 
     def _read_data(self) -> dict[str, list[dict[str, str]]]:
@@ -67,6 +74,9 @@ class MemoryService:
         dict[str, list[dict[str, str]]]
             Dictionnaire des sessions stockées.
         """
+        # Lit le fichier JSON de mémoire.
+        # En cas d'absence ou de corruption, renvoie un dictionnaire vide
+        # pour éviter de casser le service.
         if not self.memory_file.exists():
             return {}
 
@@ -85,6 +95,8 @@ class MemoryService:
         """
         Écrit le contenu mémoire dans le fichier JSON.
         """
+        # Écrit l'état mémoire complet sur disque
+        # dans un format JSON lisible.
         self.memory_dir.mkdir(parents=True, exist_ok=True)
 
         with self.memory_file.open("w", encoding="utf-8") as f:
@@ -98,24 +110,44 @@ class MemoryService:
         """
         Normalise un identifiant de session.
         """
+        # Convertit un identifiant en chaîne propre,
+        # ou chaîne vide si absent.
         return "" if session_id is None else str(session_id).strip()
 
     def _normalize_role(self, role: object) -> str:
         """
         Normalise un rôle conversationnel.
         """
+        # Uniformise les rôles en minuscules
+        # pour éviter les incohérences de casse.
         return "" if role is None else str(role).strip().lower()
 
     def _normalize_content(self, content: object) -> str:
         """
         Normalise le contenu textuel d'un message.
         """
-        return "" if content is None else str(content).strip()
+        # Nettoie légèrement le contenu message,
+        # limite sa taille pour éviter qu'un historique
+        # trop verbeux alourdisse inutilement le prompt.
+        text = "" if content is None else str(content).strip()
+
+        max_chars = 600
+        if len(text) > max_chars:
+            truncated = text[:max_chars]
+
+            if " " in truncated:
+                truncated = truncated.rsplit(" ", 1)[0]
+
+            text = truncated.rstrip(" ,;:.-") + "..."
+
+        return text
 
     def _is_valid_message(self, message: object) -> bool:
         """
         Vérifie qu'un objet ressemble à un message valide.
         """
+        # Contrôle minimal d'intégrité d'un message :
+        # structure dict, rôle autorisé, contenu non vide.
         if not isinstance(message, dict):
             return False
 
@@ -129,6 +161,9 @@ class MemoryService:
         Nettoie une liste brute de messages et conserve uniquement
         les messages valides.
         """
+        # Nettoie une liste d'historique potentiellement sale,
+        # conserve seulement les messages valides,
+        # puis applique la fenêtre mémoire maximale.
         if not isinstance(history, list):
             return []
 
@@ -155,6 +190,7 @@ class MemoryService:
         """
         Retourne la liste des identifiants de session présents en mémoire.
         """
+        # Permet d'inspecter rapidement quelles sessions existent.
         data = self._read_data()
         return sorted(str(session_id) for session_id in data.keys())
 
@@ -162,6 +198,7 @@ class MemoryService:
         """
         Indique si une session existe et contient au moins un message valide.
         """
+        # Vérifie l'existence réelle d'une session exploitable.
         session_id = self._normalize_session_id(session_id)
         if not session_id:
             return False
@@ -172,6 +209,8 @@ class MemoryService:
         """
         Retourne l'historique court d'une session.
         """
+        # Point d'accès principal à l'historique d'une session.
+        # Le résultat est systématiquement nettoyé avant retour.
         session_id = self._normalize_session_id(session_id)
         if not session_id:
             return []
@@ -197,6 +236,8 @@ class MemoryService:
             Nombre maximal de messages à conserver.
             Si None, on utilise la fenêtre mémoire du service.
         """
+        # Extrait la partie la plus récente de l'historique.
+        # Pratique pour n'injecter qu'une petite fenêtre dans le prompt.
         history = self.get_history(session_id)
         if not history:
             return []
@@ -215,6 +256,8 @@ class MemoryService:
         """
         Ajoute un message à la mémoire courte d'une session.
         """
+        # Ajoute un message unique à une session,
+        # puis recoupe l'historique à la taille maximale autorisée.
         session_id = self._normalize_session_id(session_id)
         role = self._normalize_role(role)
         content = self._normalize_content(content)
@@ -244,6 +287,8 @@ class MemoryService:
         """
         Ajoute un tour complet utilisateur + assistant à une session.
         """
+        # Helper pratique pour écrire un échange complet
+        # plutôt que deux appels séparés.
         self.append_message(session_id, "user", user_message)
         self.append_message(session_id, "assistant", assistant_message)
 
@@ -251,6 +296,7 @@ class MemoryService:
         """
         Supprime l'historique d'une session donnée.
         """
+        # Efface entièrement une session précise du stockage.
         session_id = self._normalize_session_id(session_id)
         if not session_id:
             return
@@ -263,6 +309,8 @@ class MemoryService:
         """
         Supprime les sessions invalides ou vides du stockage.
         """
+        # Nettoie le stockage global en supprimant
+        # les sessions sans identifiant valide ou sans contenu exploitable.
         data = self._read_data()
         cleaned_data: dict[str, list[dict[str, str]]] = {}
 
@@ -289,6 +337,8 @@ class MemoryService:
         """
         Formate l'historique d'une session pour l'injection dans un prompt.
         """
+        # Transforme l'historique en texte concaténé lisible,
+        # adapté à une injection simple dans un prompt LLM.
         history = self.get_recent_messages(
             session_id=session_id,
             max_messages=max_messages,
@@ -314,6 +364,8 @@ class MemoryService:
         Cette représentation est utile si le modèle ou la chaîne attend
         une liste de messages au lieu d'un simple texte concaténé.
         """
+        # Variante structurée du contexte conversationnel,
+        # utile pour les chaînes ou modèles orientés messages.
         history = self.get_recent_messages(
             session_id=session_id,
             max_messages=max_messages,
@@ -335,12 +387,17 @@ class MemoryService:
         """
         Retourne le nombre de messages valides présents dans une session.
         """
+        # Petit indicateur simple pour connaître
+        # la taille de l'historique d'une session.
         return len(self.get_history(session_id))
 
     def get_stats(self) -> dict[str, int]:
         """
         Retourne quelques statistiques simples sur la mémoire.
         """
+        # Fournit une vue d'ensemble légère du stockage mémoire :
+        # nombre de sessions, nombre total de messages,
+        # paramètres de fenêtre mémoire.
         data = self._read_data()
         n_sessions = 0
         n_messages = 0

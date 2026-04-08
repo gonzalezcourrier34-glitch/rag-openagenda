@@ -1,59 +1,10 @@
 services:
-  db:
-    image: postgres:16
-    container_name: pocrag_postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB}
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    ports:
-      - "5433:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-    networks:
-      - pocrag_network
-
-  mlflow:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: pocrag_mlflow
-    restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-    command: >
-      mlflow server
-      --backend-store-uri postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      --default-artifact-root /app/mlruns
-      --host 0.0.0.0
-      --port 5000
-    ports:
-      - "5000:5000"
-    environment:
-      MLFLOW_TRACKING_URI: http://mlflow:5000
-    volumes:
-      - mlflow_data:/app/mlruns
-    networks:
-      - pocrag_network
-
   api:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: pocrag_api
     restart: unless-stopped
-    depends_on:
-      db:
-        condition: service_healthy
-      mlflow:
-        condition: service_started
     command: >
       uvicorn app.main:app
       --host 0.0.0.0
@@ -62,9 +13,6 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
-      MLFLOW_TRACKING_URI: http://mlflow:5000
     volumes:
       - app_data:/app/data
     healthcheck:
@@ -91,13 +39,10 @@ services:
       - .env
     environment:
       API_URL: http://api:8000
-      MLFLOW_TRACKING_URI: http://mlflow:5000
     networks:
       - pocrag_network
 
 volumes:
-  postgres_data:
-  mlflow_data:
   app_data:
 
 networks:

@@ -42,6 +42,10 @@ class RetrievalService:
     """
     Service de ranking métier après la recherche vectorielle.
     """
+    # Ce service intervient après FAISS.
+    # Son rôle n'est plus de filtrer brutalement,
+    # mais de réordonner intelligemment les candidats
+    # avec un score hybride vectoriel + métier.
 
     MONTHS = {
         "janvier": 1,
@@ -57,6 +61,7 @@ class RetrievalService:
         "novembre": 11,
         "decembre": 12,
     }
+    # Référentiel mois -> numéro pour le parsing temporel.
 
     KNOWN_CITIES = {
         "montpellier",
@@ -69,6 +74,7 @@ class RetrievalService:
         "lille",
         "nantes",
     }
+    # Liste simple de villes reconnues dans la question.
 
     STRONG_KEYWORDS = {
         "rock",
@@ -96,6 +102,8 @@ class RetrievalService:
         "theatre",
         "théâtre",
     }
+    # Mots-clés fortement discriminants,
+    # utilisés pour renforcer ou pénaliser certains documents.
 
     STRONG_CULTURAL_EVENT_TYPES = {
         "exposition",
@@ -106,18 +114,21 @@ class RetrievalService:
         "conte",
         "lecture",
     }
+    # Types culturels forts.
 
     WEAK_CULTURAL_EVENT_TYPES = {
         "atelier",
         "conference",
         "visite",
     }
+    # Types culturels plus faibles, moins déterminants.
 
     WEEKEND_TIME_MODES = {
         "weekend_explicit",
         "weekend_this",
         "weekend_next",
     }
+    # Modes spéciaux de temporalité liés aux week-ends.
 
     SCORE_WEIGHTS = {
         "vector": 4.0,
@@ -165,8 +176,12 @@ class RetrievalService:
         "weekend_focus_bonus": 1.5,
         "long_event_on_weekend_query_penalty": -2.5,
     }
+    # Table centrale des bonus et pénalités métier.
+    # C'est elle qui rend le scoring explicable et ajustable.
 
     def __init__(self) -> None:
+        # Le ranking s'appuie sur le même service lexical
+        # que les autres briques pour garder une cohérence globale.
         self.lexical_service = LexicalService()
 
     # -------------------------------------------------------------------------
@@ -174,12 +189,17 @@ class RetrievalService:
     # -------------------------------------------------------------------------
 
     def _safe(self, value: object) -> str:
+        # Petit helper local pour éviter les None
+        # dans les opérations de parsing texte/date.
         return "" if value is None else str(value)
 
     def normalize_text(self, text: object) -> str:
+        # Point d'accès local à la normalisation partagée.
         return self.lexical_service.normalize_text(text)
 
     def parse_iso_date(self, value: str | None) -> date | None:
+        # Convertit une chaîne ISO en objet date
+        # pour les comparaisons temporelles.
         value = self._safe(value).strip()
         if not value:
             return None
@@ -190,12 +210,16 @@ class RetrievalService:
             return None
 
     def _build_date(self, year: int, month: int, day: int) -> date | None:
+        # Construit une date de manière sûre
+        # sans casser le service si elle est invalide.
         try:
             return date(year, month, day)
         except ValueError:
             return None
 
     def _get_month_bounds(self, year: int, month: int) -> tuple[date, date]:
+        # Retourne les bornes semi-ouvertes d'un mois
+        # pour tester facilement un chevauchement.
         month_start = date(year, month, 1)
 
         if month == 12:
@@ -206,6 +230,7 @@ class RetrievalService:
         return month_start, month_end
 
     def _get_year_bounds(self, year: int) -> tuple[date, date]:
+        # Retourne les bornes semi-ouvertes d'une année.
         return date(year, 1, 1), date(year + 1, 1, 1)
 
     def _get_weekend_range(
@@ -213,6 +238,8 @@ class RetrievalService:
         reference: date,
         next_weekend: bool = False,
     ) -> tuple[date, date]:
+        # Calcule le samedi et le dimanche pertinents
+        # à partir d'une date de référence.
         weekday = reference.weekday()
 
         if weekday == 5:
@@ -233,6 +260,8 @@ class RetrievalService:
         self,
         question_norm: str,
     ) -> tuple[date | None, date | None]:
+        # Détecte un week-end explicitement formulé
+        # et le convertit en bornes calendaires.
         month_names = "|".join(self.MONTHS.keys())
 
         patterns = [
@@ -286,6 +315,8 @@ class RetrievalService:
     # -------------------------------------------------------------------------
 
     def _doc_dates(self, doc: Document) -> tuple[date | None, date | None]:
+        # Lit les dates utiles d'un document
+        # et considère mono-jour si seule la date de début existe.
         md = doc.metadata or {}
         first_date = self.parse_iso_date(md.get("first_date"))
         last_date = self.parse_iso_date(md.get("last_date"))
@@ -296,6 +327,8 @@ class RetrievalService:
         return first_date, last_date
 
     def _doc_text(self, doc: Document) -> str:
+        # Produit un texte consolidé du document pour le matching lexical.
+        # search_text est prioritaire car il a été construit pour ça.
         md = doc.metadata or {}
         search_text = md.get("search_text", "")
 
@@ -316,6 +349,8 @@ class RetrievalService:
         return self.normalize_text(text)
 
     def _doc_title_keywords(self, doc: Document) -> set[str]:
+        # Récupère les keywords du titre déjà enrichis,
+        # sous forme d'ensemble normalisé.
         md = doc.metadata or {}
         keywords = md.get("keywords_title", [])
 
@@ -329,6 +364,7 @@ class RetrievalService:
         }
 
     def _doc_derived_terms(self, doc: Document) -> set[str]:
+        # Récupère les termes métier dérivés du document.
         md = doc.metadata or {}
         terms = md.get("derived_event_terms", [])
 
@@ -342,6 +378,7 @@ class RetrievalService:
         }
 
     def _doc_derived_music_terms(self, doc: Document) -> set[str]:
+        # Récupère les termes musicaux dérivés du document.
         md = doc.metadata or {}
         terms = md.get("derived_music_terms", [])
 
@@ -355,10 +392,13 @@ class RetrievalService:
         }
 
     def _doc_city(self, doc: Document) -> str:
+        # Lit la ville documentaire en version normalisée.
         md = doc.metadata or {}
         return md.get("city_norm") or self.normalize_text(md.get("city", ""))
 
     def _doc_event_type(self, doc: Document) -> str:
+        # Privilégie le type canonique si disponible,
+        # sinon retombe sur le type brut normalisé.
         md = doc.metadata or {}
         return (
             md.get("canonical_event_type_norm")
@@ -368,10 +408,14 @@ class RetrievalService:
         )
 
     def _doc_music_genre(self, doc: Document) -> str:
+        # Lit le genre musical en version normalisée.
         md = doc.metadata or {}
         return md.get("music_genre_norm") or self.normalize_text(md.get("music_genre", ""))
 
     def _doc_duration_days(self, doc: Document) -> int:
+        # Récupère la durée documentaire.
+        # Si elle manque totalement, retourne une très grande valeur
+        # pour pénaliser les cas indéterminés dans certains scénarios.
         md = doc.metadata or {}
         value = md.get("duration_days")
 
@@ -392,6 +436,7 @@ class RetrievalService:
         return max(1, (last_date - first_date).days + 1)
 
     def _doc_is_single_day(self, doc: Document) -> bool | None:
+        # Lit le booléen mono-jour si déjà disponible.
         md = doc.metadata or {}
         value = md.get("is_single_day")
 
@@ -401,6 +446,7 @@ class RetrievalService:
         return None
 
     def _doc_content_quality(self, doc: Document) -> int:
+        # Lit le score de qualité documentaire calculé en amont.
         md = doc.metadata or {}
         value = md.get("content_quality")
 
@@ -410,26 +456,32 @@ class RetrievalService:
             return 0
 
     def _doc_has_long_description(self, doc: Document) -> bool:
+        # Sert à récompenser légèrement les documents plus riches.
         md = doc.metadata or {}
         return bool(md.get("has_long_description"))
 
     def _doc_is_strong_cultural_candidate(self, doc: Document) -> bool:
+        # Réutilise le flag culturel fort enrichi.
         md = doc.metadata or {}
         return bool(md.get("is_strong_cultural_candidate", False))
 
     def _doc_is_weak_cultural_candidate(self, doc: Document) -> bool:
+        # Réutilise le flag culturel faible enrichi.
         md = doc.metadata or {}
         return bool(md.get("is_weak_cultural_candidate", False))
 
     def _doc_has_market_signal(self, doc: Document) -> bool:
+        # Détecte un signal de marché / vente.
         md = doc.metadata or {}
         return bool(md.get("has_market_signal", False))
 
     def _doc_has_repair_signal(self, doc: Document) -> bool:
+        # Détecte un signal de réparation / repair café.
         md = doc.metadata or {}
         return bool(md.get("has_repair_signal", False))
 
     def _doc_has_business_signal(self, doc: Document) -> bool:
+        # Détecte un signal business / networking.
         md = doc.metadata or {}
         return bool(md.get("has_business_signal", False))
 
@@ -438,12 +490,16 @@ class RetrievalService:
     # -------------------------------------------------------------------------
 
     def _extract_city(self, question: str) -> str | None:
+        # Détecte une ville explicite dans la question.
         for city in sorted(self.KNOWN_CITIES, key=len, reverse=True):
             if re.search(rf"\b{re.escape(city)}\b", question):
                 return city
         return None
 
     def _extract_price_filter(self, question: str) -> str | None:
+        # Petit fallback tarifaire local.
+        # Dans la pratique, lexical_service en donne déjà un,
+        # mais on garde un garde-fou simple.
         if re.search(r"\bgratuit(?:e|s)?\b", question):
             return "gratuit"
 
@@ -453,6 +509,8 @@ class RetrievalService:
         return None
 
     def _extract_date_filters(self, question: str) -> dict[str, Any]:
+        # Construit les filtres temporels détectés dans la question :
+        # date exacte, intervalle, mois, année, week-end, etc.
         result = {
             "exact_date": None,
             "date_start": None,
@@ -571,6 +629,8 @@ class RetrievalService:
         return result
 
     def extract_signals(self, question: str) -> dict[str, Any]:
+        # Fonction de synthèse côté question.
+        # Elle transforme une question libre en signaux structurés pour le ranking.
         q = self.normalize_text(question)
         date_filters = self._extract_date_filters(q)
         lexical_signals = self.lexical_service.extract_question_signals(q)
@@ -641,6 +701,8 @@ class RetrievalService:
     # -------------------------------------------------------------------------
 
     def _vector_score_to_bonus(self, doc: Document) -> float:
+        # Convertit la distance vectorielle FAISS en bonus métier.
+        # Plus le document est proche vectoriellement, plus le bonus est élevé.
         md = doc.metadata or {}
         raw_score = md.get("vector_score")
 
@@ -661,6 +723,8 @@ class RetrievalService:
         doc_derived_terms: set[str],
         variants: list[str],
     ) -> bool:
+        # Vérifie si le document supporte une variante lexicale
+        # à travers son texte, ses keywords de titre et ses termes dérivés.
         support_text = f"{doc_text} {' '.join(doc_title_keywords)} {' '.join(doc_derived_terms)}"
         return self.lexical_service.contains_any_term(support_text, variants)
 
@@ -671,6 +735,8 @@ class RetrievalService:
         query_start: date | None,
         query_end: date | None,
     ) -> bool:
+        # Teste le chevauchement entre la période du document
+        # et la période demandée.
         if not event_start:
             return False
 
@@ -686,6 +752,7 @@ class RetrievalService:
         return event_start <= query_end and event_end >= query_start
 
     def _keyword_text_score(self, doc_text: str, keywords: list[str]) -> float:
+        # Score léger basé sur la présence brute des keywords dans le texte du document.
         if not keywords:
             return 0.0
 
@@ -697,6 +764,8 @@ class RetrievalService:
         doc_title_keywords: set[str],
         keywords: list[str],
     ) -> tuple[float, int, int]:
+        # Score spécifique basé sur les mots-clés présents dans le titre.
+        # Renvoie aussi le nombre présents / absents pour le debug.
         if not keywords:
             return 0.0, 0, 0
 
@@ -711,6 +780,7 @@ class RetrievalService:
         doc_derived_terms: set[str],
         keywords: list[str],
     ) -> float:
+        # Score basé sur les termes métier dérivés du document.
         if not keywords or not doc_derived_terms:
             return 0.0
 
@@ -724,6 +794,8 @@ class RetrievalService:
         doc_derived_terms: set[str],
         strong_keywords: list[str],
     ) -> float:
+        # Récompense ou pénalise selon la présence
+        # des mots-clés les plus discriminants.
         if not strong_keywords:
             return 0.0
 
@@ -739,6 +811,7 @@ class RetrievalService:
         return score
 
     def _content_quality_score(self, doc: Document) -> float:
+        # Récompense légèrement les documents plus riches et mieux renseignés.
         score = 0.0
         score += self._doc_content_quality(doc) * self.SCORE_WEIGHTS["content_quality"]
 
@@ -758,6 +831,8 @@ class RetrievalService:
         doc_derived_terms: set[str],
         doc_derived_music_terms: set[str],
     ) -> bool:
+        # Détermine si le document est vraiment musical.
+        # Sert de garde-fou contre les faux positifs.
         if doc_event_type in self.lexical_service.MUSICAL_EVENT_TYPES:
             return True
 
@@ -795,6 +870,8 @@ class RetrievalService:
         doc_event_type: str,
         doc_derived_terms: set[str],
     ) -> bool:
+        # Détermine si le document est culturel,
+        # en réutilisant les flags et quelques règles métier.
         if self._doc_has_business_signal(doc):
             return False
 
@@ -832,6 +909,8 @@ class RetrievalService:
         doc_title_keywords: set[str],
         doc_derived_terms: set[str],
     ) -> str:
+        # Retourne exact / variant / mismatch
+        # pour le matching de type d'événement.
         if not requested_event_type:
             return "variant"
 
@@ -863,6 +942,8 @@ class RetrievalService:
         requested_genre: str,
         doc_music_genre: str,
     ) -> bool:
+        # Détecte certains genres "voisins"
+        # qui ne sont pas identiques mais pas totalement absurdes non plus.
         if not requested_genre or not doc_music_genre:
             return False
 
@@ -884,6 +965,14 @@ class RetrievalService:
         doc: Document,
         signals: dict[str, Any],
     ) -> bool:
+        """
+        Garde-fou strict post-vectoriel.
+
+        Vérifie si un document reste compatible avec les contraintes
+        explicitement présentes dans la question.
+        """
+        # Sert de filet de sécurité après FAISS :
+        # évite qu'un document franchement incompatible survive au ranking.
         doc_text = self._doc_text(doc)
         doc_title_keywords = self._doc_title_keywords(doc)
         doc_derived_terms = self._doc_derived_terms(doc)
@@ -994,6 +1083,8 @@ class RetrievalService:
         return True
 
     def _duration_penalty(self, doc: Document, signals: dict[str, Any]) -> float:
+        # Pénalise les événements très longs,
+        # surtout lorsque la question est temporellement précise.
         duration_days = self._doc_duration_days(doc)
 
         if duration_days == 999999:
@@ -1017,6 +1108,7 @@ class RetrievalService:
         return 0.0
 
     def _implicit_penalty_score(self, doc: Document, signals: dict[str, Any]) -> float:
+        # Applique des pénalités implicites selon le contexte de la requête.
         score = 0.0
 
         if signals["is_cultural_query"]:
@@ -1043,6 +1135,17 @@ class RetrievalService:
     # -------------------------------------------------------------------------
 
     def score_document(self, doc: Document, signals: dict[str, Any]) -> float:
+        """
+        Calcule le score final métier d'un document.
+
+        Ce score combine :
+        - proximité vectorielle
+        - compatibilité avec les contraintes explicites
+        - bonus de qualité documentaire
+        - pénalités métier explicables
+        """
+        # Cœur du service.
+        # C'est ici que le document reçoit son score final avant tri.
         md = doc.metadata or {}
 
         doc_text = self._doc_text(doc)
@@ -1121,6 +1224,7 @@ class RetrievalService:
                 score += self.SCORE_WEIGHTS["music_doc_missing"]
 
         if signals["event_type"] == "concert":
+            # Cas particulier : un concert doit vraiment être musical.
             is_musical_doc = self._is_musical_document(
                 doc_text=doc_text,
                 doc_event_type=doc_event_type,
@@ -1245,6 +1349,8 @@ class RetrievalService:
         if doc.metadata is None:
             doc.metadata = {}
 
+        # On conserve des traces utiles dans les métadonnées
+        # pour comprendre ensuite pourquoi le document a obtenu ce score.
         doc.metadata["matched_title_keywords"] = n_present
         doc.metadata["missing_title_keywords"] = n_absent
         doc.metadata["detected_city_signal"] = signals["city"]
@@ -1272,6 +1378,7 @@ class RetrievalService:
         first_date: date | None,
         last_date: date | None,
     ) -> date:
+        # Choisit une date de référence de tri pour le document.
         if first_date:
             return first_date
         if last_date:
@@ -1283,6 +1390,8 @@ class RetrievalService:
         doc: Document,
         signals: dict[str, Any],
     ) -> int:
+        # Calcule une distance temporelle entre le document
+        # et la contrainte de temps de la question.
         first_date, last_date = self._doc_dates(doc)
 
         if not first_date:
@@ -1335,6 +1444,8 @@ class RetrievalService:
         final_score: float,
         signals: dict[str, Any],
     ) -> tuple[float, int, int, int]:
+        # Clé de tri finale :
+        # score, proximité temporelle, récence, durée.
         first_date, last_date = self._doc_dates(doc)
         recency_date = self._recency_anchor_date(first_date, last_date)
         duration_days = self._doc_duration_days(doc)
@@ -1348,6 +1459,8 @@ class RetrievalService:
         )
 
     def _doc_similarity_signature(self, doc: Document) -> set[str]:
+        # Produit une signature légère du document
+        # pour détecter les résultats trop similaires.
         md = doc.metadata or {}
         title = self.normalize_text(md.get("title", ""))
         location = self.normalize_text(md.get("location_name", ""))
@@ -1372,6 +1485,8 @@ class RetrievalService:
         signals: dict[str, Any],
         top_k: int,
     ) -> list[Document]:
+        # Réduit légèrement les doublons sémantiques ou quasi-jumeaux
+        # dans la liste finale.
         if not scored_docs:
             return []
 
@@ -1420,6 +1535,9 @@ class RetrievalService:
         - on ne post-filtre pas "culturel" si la question ne le demande pas
         - on ne restreint pas les requêtes larges de type "que faire"
         """
+        # Filet de sécurité post-FAISS.
+        # Si la question contient des contraintes explicites,
+        # on tente d'écarter les documents franchement incompatibles.
         if not raw_docs:
             return []
 
@@ -1461,6 +1579,17 @@ class RetrievalService:
         raw_docs: list[Document],
         top_k: int = 3,
     ) -> list[Document]:
+        """
+        Classe les documents candidats et retourne les meilleurs.
+
+        Étapes :
+        1. extraction des signaux de question
+        2. garde-fou strict post-vectoriel
+        3. scoring métier
+        4. tri
+        5. diversification légère
+        """
+        # API principale du service.
         if not raw_docs:
             return []
 
@@ -1500,6 +1629,14 @@ class RetrievalService:
         raw_docs: list[Document],
         top_k: int = 3,
     ) -> list[dict[str, Any]]:
+        """
+        Variante de debug du ranking.
+
+        Retourne les documents avec leurs scores et plusieurs signaux utiles
+        à l'analyse du classement.
+        """
+        # Version explicable / debug du service.
+        # Très utile pour comprendre le comportement du ranking en soutenance.
         if not raw_docs:
             return []
 

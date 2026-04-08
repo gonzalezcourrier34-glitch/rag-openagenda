@@ -60,10 +60,13 @@ LEX = LexicalService()
 # -------------------------------------------------------------------------
 # Paramètres documentaires
 # -------------------------------------------------------------------------
-
+#Limite la taille de la description courte destinée au page_content déstiné au LLM.
 MAX_PAGE_DESCRIPTION_CHARS = 320
+#Limite la description utilisée dans search_text déstiné à l'embedding.
 MAX_SEARCH_DESCRIPTION_CHARS = 420
+#Limite la version longue de la description dans search_text.
 MAX_SEARCH_LONG_DESCRIPTION_CHARS = 520
+#Longueur maximale du texte final search_text.
 MAX_SEARCH_TEXT_CHARS = 900
 
 # Seuil minimal pour considérer qu'une longue description est réellement utile
@@ -78,6 +81,9 @@ def _nested_get(data: dict[str, Any], *keys: str) -> Any:
     """
     Accède en sécurité à des clés imbriquées d'un dictionnaire.
     """
+    # Parcourt progressivement les clés demandées.
+    # Si à un moment la structure n'est plus un dictionnaire,
+    # on renvoie None au lieu de lever une erreur.
     current: Any = data
 
     for key in keys:
@@ -92,6 +98,9 @@ def _first_non_empty(*values: object) -> str:
     """
     Retourne la première valeur textuelle non vide.
     """
+    # Sert de fallback générique :
+    # on essaie plusieurs valeurs possibles
+    # et on garde la première réellement exploitable.
     for value in values:
         text = LEX.extract_text(value)
         if text:
@@ -104,6 +113,11 @@ def _extract_event_field(event: dict[str, Any], *paths: tuple[str, ...]) -> str:
     """
     Extrait le premier champ non vide parmi plusieurs chemins possibles.
     """
+    # Centralise la logique de fallback sur les champs OpenAgenda.
+    # Exemple :
+    # - ("title",)
+    # - ("title", "fr")
+    # Cela évite de répéter des if/else partout dans le code.
     candidates: list[object] = []
 
     for path in paths:
@@ -119,6 +133,9 @@ def _normalize_whitespace(value: object) -> str:
     """
     Normalise les espaces et les retours ligne d'un texte.
     """
+    # Nettoie un texte pour obtenir une version homogène :
+    # pas de doubles espaces, pas de retours ligne parasites,
+    # pas de tabulations inutiles.
     text = LEX.extract_text(value)
     if not text:
         return ""
@@ -130,6 +147,9 @@ def _truncate_text(value: object, max_chars: int) -> str:
     """
     Tronque un texte proprement sans couper brutalement au milieu d'un mot.
     """
+    # Utilisé pour plafonner les descriptions
+    # afin d'éviter des textes trop longs dans le contexte LLM
+    # ou dans le texte d'embedding.
     text = _normalize_whitespace(value)
     if not text:
         return ""
@@ -139,6 +159,8 @@ def _truncate_text(value: object, max_chars: int) -> str:
 
     truncated = text[:max_chars]
 
+    # Si possible, on coupe au dernier espace
+    # pour éviter un rendu visuellement sale.
     if " " in truncated:
         truncated = truncated.rsplit(" ", 1)[0]
 
@@ -149,6 +171,8 @@ def _join_non_empty(parts: list[str], sep: str = " ") -> str:
     """
     Concatène uniquement les éléments non vides.
     """
+    # Assemble proprement une liste de fragments textuels
+    # sans injecter d'éléments vides dans le résultat final.
     return sep.join(part for part in parts if part)
 
 
@@ -160,6 +184,8 @@ def _parse_iso_date(value: object) -> datetime | None:
     """
     Parse une date ISO.
     """
+    # Tente d'abord un parsing ISO complet
+    # puis un fallback plus simple sur YYYY-MM-DD.
     raw = LEX.extract_text(value)
     if not raw:
         return None
@@ -179,6 +205,8 @@ def _normalize_iso_day(value: object) -> str:
     """
     Ramène une date potentielle au format `YYYY-MM-DD`.
     """
+    # Uniformise les dates pour simplifier les comparaisons,
+    # le filtrage, et le stockage dans les métadonnées.
     parsed = _parse_iso_date(value)
     if parsed is None:
         return ""
@@ -190,6 +218,9 @@ def _build_duration_label(first_date: str, last_date: str) -> str:
     """
     Construit un libellé métier simple décrivant la durée de l'événement.
     """
+    # Produit un libellé textuel simple,
+    # utile à la fois pour l'interprétation métier
+    # et comme signal textuel dans le search_text.
     dt_start = _parse_iso_date(first_date)
     dt_end = _parse_iso_date(last_date)
 
@@ -215,6 +246,9 @@ def _compute_duration_days(first_date: str, last_date: str) -> int | None:
     """
     Calcule la durée de l'événement en jours.
     """
+    # Version structurée de la durée.
+    # Ce signal peut être utilisé plus tard
+    # dans les filtres, le ranking ou l'analyse.
     dt_start = _parse_iso_date(first_date)
     dt_end = _parse_iso_date(last_date)
 
@@ -256,6 +290,9 @@ def _compute_content_quality(
     """
     Calcule un score simple de qualité documentaire.
     """
+    # Score additif volontairement simple et explicable.
+    # L'idée n'est pas de produire une vérité absolue,
+    # mais un indicateur pratique de richesse documentaire.
     score = 0
     score += int(bool(title))
     score += int(bool(description))
@@ -282,6 +319,9 @@ def _build_cultural_tags(
     """
     Déduit quelques tags culturels simples pour enrichir le `search_text`.
     """
+    # Ajoute des mots utiles à la recherche sémantique
+    # et au matching lexical léger.
+    # Le but est d'aider la récupération sans surcharger le document.
     tags: set[str] = set()
 
     if canonical_event_type in {
@@ -325,6 +365,9 @@ def _build_implicit_relevance_flags(
     """
     Déduit quelques drapeaux implicites de pertinence métier.
     """
+    # Ces drapeaux servent à enrichir le document avec des signaux métier
+    # simples, lisibles et explicables.
+    # Ils sont utiles pour limiter certains faux positifs.
     support_text = LEX.normalize_text(
         f"{title} {description} {long_description} {' '.join(derived_terms)} {canonical_event_type}"
     )
@@ -371,6 +414,8 @@ def _build_page_content(
     """
     Construit la fiche courte destinée au LLM.
     """
+    # Ce texte est pensé pour être lu directement par le LLM.
+    # Il doit rester compact, lisible et structuré.
     page_lines = [
         f"Titre : {title}",
         f"Description : {description_short}",
@@ -426,6 +471,9 @@ def _build_search_text(
     Construit le texte riche destiné à l'embedding, au matching lexical léger
     et au ranking métier.
     """
+    # Ce texte est plus dense que page_content.
+    # Il embarque des signaux utiles pour la récupération :
+    # sémantique, mots-clés, tags culturels, prix, durée, audience, etc.
     parts = [
         title,
         canonical_event_type,
@@ -477,6 +525,9 @@ def _matches_zone_scope(doc: Document, zone: str, scope: str) -> bool:
     La logique est légèrement souple pour tolérer certaines variantes
     documentaires simples.
     """
+    # Même si OpenAgenda filtre déjà,
+    # on ajoute ici une vérification locale de cohérence géographique.
+    # Cela limite certains faux positifs.
     zone_norm = LEX.normalize_text(zone)
     md = doc.metadata or {}
 
@@ -505,6 +556,9 @@ def get_default_date_window(
     """
     Calcule la fenêtre temporelle utilisée pour récupérer les événements.
     """
+    # Définit une fenêtre raisonnable autour de la date du jour
+    # pour ne pas interroger des événements trop anciens
+    # ou trop éloignés dans le futur.
     today = date.today()
     date_from = (today - timedelta(days=days_back)).isoformat()
     date_to = (today + timedelta(days=days_forward)).isoformat()
@@ -515,6 +569,8 @@ def search_agendas_for_zone(zone: str, size: int = 30) -> list[dict[str, Any]]:
     """
     Recherche les agendas OpenAgenda officiels susceptibles de concerner une zone.
     """
+    # Première étape de collecte :
+    # on cherche les agendas pertinents avant de récupérer leurs événements.
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante")
 
@@ -545,6 +601,8 @@ def fetch_openagenda_events(
     """
     Récupère les événements d'un agenda OpenAgenda.
     """
+    # Récupération paginée des événements.
+    # On accumule les pages jusqu'à épuisement ou atteinte du plafond max_pages.
     if not OPENAGENDA_API_KEY:
         raise ValueError("OPENAGENDA_API_KEY manquante")
 
@@ -591,6 +649,9 @@ def build_event_document(event: dict[str, Any]) -> Document:
     """
     Transforme un événement OpenAgenda en `Document` LangChain.
     """
+    # Fonction centrale du module.
+    # Elle extrait, nettoie, enrichit, structure
+    # puis transforme un événement brut en Document prêt pour le pipeline.
     event_uid = _extract_event_field(event, ("uid",))
     agenda_uid = _extract_event_field(event, ("agenda", "uid"))
 
@@ -630,6 +691,8 @@ def build_event_document(event: dict[str, Any]) -> Document:
         ("url",),
     )
 
+    # Nettoyage homogène de tous les champs textuels
+    # avant enrichissement.
     title = _normalize_whitespace(title)
     description = _normalize_whitespace(description)
     long_description = _normalize_whitespace(long_description)
@@ -639,6 +702,8 @@ def build_event_document(event: dict[str, Any]) -> Document:
     event_type = _normalize_whitespace(event_type)
     source_url = _normalize_whitespace(source_url)
 
+    # Détection du prix / gratuité.
+    # C'est un signal important pour le filtrage métier.
     price_info, is_free = LEX.extract_price_info(
         title,
         description,
@@ -648,6 +713,9 @@ def build_event_document(event: dict[str, Any]) -> Document:
         event.get("attendanceMode"),
     )
 
+    # Construction du profil lexical documentaire.
+    # C'est ici que l'on dérive le type canonique,
+    # les mots-clés, l'audience, le genre musical, etc.
     lexical_profile = LEX.build_document_lexical_profile(
         title=title,
         description=description,
@@ -666,6 +734,9 @@ def build_event_document(event: dict[str, Any]) -> Document:
     # Garde-fou musical
     # ------------------------------------------------------------------
 
+    # On évite ici les faux positifs musicaux.
+    # Un genre musical détecté lexicalement n'est conservé
+    # que s'il existe aussi un vrai contexte musical dans le document.
     if canonical_music_genre:
         support_text = LEX.normalize_text(
             f"{title} {description} {long_description} {event_type} {canonical_event_type}"
@@ -698,6 +769,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
             canonical_music_genre = ""
             derived_music_terms = []
 
+    # Calculs de durée et de libellés d'accès.
     duration_label = _build_duration_label(first_date, last_date)
     duration_days = _compute_duration_days(first_date, last_date)
 
@@ -711,11 +783,14 @@ def build_event_document(event: dict[str, Any]) -> Document:
     is_single_day = duration_days == 1 if duration_days is not None else None
     has_long_description = len(long_description) >= MIN_LONG_DESCRIPTION_CHARS
 
+    # Tags culturels simples
+    # pour enrichir le texte de recherche.
     cultural_tags = _build_cultural_tags(
         canonical_event_type=canonical_event_type,
         derived_terms=derived_terms,
     )
 
+    # Signaux implicites utiles pour le ranking ou l'analyse.
     implicit_flags = _build_implicit_relevance_flags(
         title=title,
         description=description,
@@ -725,6 +800,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
         lexical_profile=lexical_profile,
     )
 
+    # Score global de richesse documentaire.
     content_quality = _compute_content_quality(
         title=title,
         description=description,
@@ -741,6 +817,8 @@ def build_event_document(event: dict[str, Any]) -> Document:
         canonical_event_type=canonical_event_type,
     )
 
+    # Préparation de versions tronquées adaptées
+    # à leurs usages respectifs.
     description_short = _truncate_text(description, MAX_PAGE_DESCRIPTION_CHARS)
     description_search = _truncate_text(description, MAX_SEARCH_DESCRIPTION_CHARS)
     long_description_search = _truncate_text(
@@ -750,6 +828,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
 
     event_type_label = canonical_event_type or event_type or "type non precise"
 
+    # Texte court lisible pour le LLM.
     page_content = _build_page_content(
         title=title,
         description_short=description_short,
@@ -764,6 +843,7 @@ def build_event_document(event: dict[str, Any]) -> Document:
         source_url=source_url,
     )
 
+    # Texte plus riche pour embedding / retrieval / ranking.
     search_text = _build_search_text(
         title=title,
         description_search=description_search,
@@ -786,6 +866,8 @@ def build_event_document(event: dict[str, Any]) -> Document:
         cultural_tags=cultural_tags,
     )
 
+    # Métadonnées structurées consommées ensuite
+    # par les autres services du pipeline.
     metadata = {
         "doc_id": f"openagenda_{event_uid}" if event_uid else "",
         "event_uid": event_uid,
@@ -840,6 +922,10 @@ def load_documents(
     """
     Charge les documents OpenAgenda prêts à être indexés.
     """
+    # Fonction d'orchestration documentaire.
+    # Elle cherche les agendas, récupère leurs événements,
+    # construit les documents, déduplique,
+    # puis filtre les incohérences géographiques résiduelles.
     agendas = search_agendas_for_zone(zone)
 
     documents: list[Document] = []
@@ -862,11 +948,13 @@ def load_documents(
         for event in events:
             event_uid = LEX.extract_text(event.get("uid"))
 
+            # Déduplication par identifiant événement.
             if not event_uid or event_uid in seen_event_uids:
                 continue
 
             doc = build_event_document(event)
 
+            # Vérification finale locale sur la zone demandée.
             if not _matches_zone_scope(doc, zone=zone, scope=scope):
                 continue
 

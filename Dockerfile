@@ -13,7 +13,6 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
-    libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN pip install --no-cache-dir uv
@@ -32,13 +31,13 @@ ENV PATH="/app/.venv/bin:$PATH"
 
 COPY . .
 
-#création des repertoire de stockage locaux 
+# création des répertoires de stockage locaux
 RUN useradd -m appuser \
     && mkdir -p /app/data/raw /app/data/processed \
     && chown -R appuser:appuser /app
 
-    USER appuser
+USER appuser
 
-EXPOSE 8000 8501 5000
+EXPOSE 8000 8501
 
 CMD ["python", "--version"]

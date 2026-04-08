@@ -60,6 +60,9 @@ class LexicalService:
     - il limite les déductions agressives
     - il sert de base commune à plusieurs composants
     """
+    # Cette classe joue le rôle de couche lexicale commune.
+    # Elle évite que chaque service réimplémente sa propre logique
+    # de normalisation, de matching et de détection de signaux métier.
 
     STOPWORDS = {
         "le",
@@ -126,6 +129,7 @@ class LexicalService:
         "jour",
         "jours",
     }
+    # Mots trop fréquents ou peu discriminants pour l'extraction de keywords.
 
     EVENT_TYPE_TERMS = {
         "exposition": [
@@ -283,6 +287,8 @@ class LexicalService:
             "lectures performées",
         ],
     }
+    # Dictionnaire principal de correspondance
+    # type canonique -> variantes lexicales reconnues.
 
     MUSIC_GENRE_TERMS = {
         "rock": ["rock", "garage", "punk", "noise", "metal", "grunge", "hardcore"],
@@ -293,11 +299,13 @@ class LexicalService:
         "rap": ["rap", "hip hop", "hip-hop"],
         "classique": ["classique", "baroque", "symphonique", "orchestre"],
     }
+    # Référentiel des genres musicaux canoniques et de leurs variantes.
 
     AUDIENCE_TERMS = {
         "enfant": ["enfant", "enfants", "jeune public"],
         "famille": ["famille", "familial", "familiale", "tout public"],
     }
+    # Référentiel simple de signaux de public cible.
 
     FREE_MARKERS = [
         "gratuit",
@@ -312,6 +320,7 @@ class LexicalService:
         "sans frais",
         "free",
     ]
+    # Marqueurs de gratuité détectables dans les textes.
 
     PAID_MARKERS = [
         "payant",
@@ -330,6 +339,7 @@ class LexicalService:
         "euro",
         "euros",
     ]
+    # Marqueurs de paiement ou de billetterie.
 
     CULTURAL_EVENT_TYPES = {
         "exposition",
@@ -340,12 +350,15 @@ class LexicalService:
         "conte",
         "lecture",
     }
+    # Types considérés comme culturels forts.
 
     MUSICAL_EVENT_TYPES = {
         "concert",
         "festival",
         "spectacle",
     }
+    # Types ayant une dimension musicale suffisamment forte
+    # pour servir dans certains garde-fous.
 
     STRONG_CULTURAL_TERMS = [
         "exposition",
@@ -368,6 +381,7 @@ class LexicalService:
         "musée",
         "galerie",
     ]
+    # Vocabulaire culturel explicite et fort.
 
     MEDIUM_CULTURAL_TERMS = [
         "conference",
@@ -381,6 +395,8 @@ class LexicalService:
         "photographie",
         "photo",
     ]
+    # Vocabulaire culturel utile mais moins fort,
+    # donc à manier avec prudence.
 
     # Attention :
     # ces termes faibles ne doivent PAS activer un filtre culturel fort.
@@ -396,6 +412,8 @@ class LexicalService:
         "agenda",
         "programme",
     ]
+    # Vocabulaire d'exploration large, non suffisant
+    # pour conclure à une vraie contrainte culturelle.
 
     MARKET_TERMS = [
         "braderie",
@@ -410,6 +428,7 @@ class LexicalService:
         "vinyl pop up",
         "vinyl pop-up",
     ]
+    # Signaux de marché / vente / brocante.
 
     REPAIR_TERMS = [
         "repair cafe",
@@ -421,6 +440,7 @@ class LexicalService:
         "atelier de reparation",
         "atelier de réparation",
     ]
+    # Signaux de réparation ou repair café.
 
     RELIGIOUS_TERMS = [
         "messe",
@@ -434,6 +454,7 @@ class LexicalService:
         "paroisse",
         "patronage",
     ]
+    # Signaux religieux simples.
 
     BUSINESS_TERMS = [
         "franchise",
@@ -444,6 +465,8 @@ class LexicalService:
         "business",
         "salon professionnel",
     ]
+    # Signaux business ou professionnels,
+    # utiles pour éviter des faux positifs culturels.
 
     KNOWN_CITY_TERMS = [
         "montpellier",
@@ -457,6 +480,8 @@ class LexicalService:
         "lille",
         "nantes",
     ]
+    # Réserve de villes connues, potentiellement utile
+    # pour certains helpers géographiques futurs.
 
     def __init__(self) -> None:
         """
@@ -468,6 +493,8 @@ class LexicalService:
         - accélérer les matching fréquents
         - garder une logique homogène dans tout le pipeline
         """
+        # Prépare à l'avance des versions normalisées des référentiels
+        # pour éviter de refaire le même travail à chaque appel.
         self._event_type_terms_norm = self._normalize_term_mapping(self.EVENT_TYPE_TERMS)
         self._music_genre_terms_norm = self._normalize_term_mapping(self.MUSIC_GENRE_TERMS)
         self._audience_terms_norm = self._normalize_term_mapping(self.AUDIENCE_TERMS)
@@ -503,6 +530,8 @@ class LexicalService:
         list[str]
             Liste triée de termes normalisés non vides.
         """
+        # Sert à homogénéiser une liste de termes métier :
+        # minuscules, accents retirés, espaces nettoyés, doublons supprimés.
         normalized = {
             self.normalize_text(term)
             for term in terms
@@ -524,6 +553,9 @@ class LexicalService:
         dict[str, list[str]]
             Dictionnaire équivalent avec variantes normalisées.
         """
+        # Applique la normalisation à tout un dictionnaire
+        # de variantes lexicales afin de le rendre exploitable
+        # par les fonctions de matching.
         normalized_mapping: dict[str, list[str]] = {}
 
         for key, values in mapping.items():
@@ -549,6 +581,8 @@ class LexicalService:
         str
             Chaîne vide si la valeur est nulle, sinon conversion en texte.
         """
+        # Petit garde-fou utilitaire pour éviter les None
+        # dans la chaîne de traitement textuel.
         return "" if value is None else str(value)
 
     def clean_text(self, value: object) -> str:
@@ -571,6 +605,8 @@ class LexicalService:
         str
             Texte nettoyé.
         """
+        # Produit une version lisible et stable du texte brut
+        # avant toute normalisation plus poussée.
         text = self.safe(value)
         text = text.replace("\r", " ").replace("\n", " ").replace("\t", " ")
         text = re.sub(r"\s+", " ", text)
@@ -602,6 +638,8 @@ class LexicalService:
         str
             Texte extrait.
         """
+        # Uniformise des formats d'entrée variés.
+        # Très utile pour OpenAgenda où certains champs sont multilingues.
         if isinstance(value, dict):
             for key in ("fr", "en"):
                 if key in value and value[key]:
@@ -637,6 +675,8 @@ class LexicalService:
         str
             Texte normalisé.
         """
+        # C'est la base de toute comparaison lexicale du service.
+        # Deux textes visuellement différents deviennent comparables.
         text = self.extract_text(value).lower()
         text = unicodedata.normalize("NFKD", text)
         text = "".join(char for char in text if not unicodedata.combining(char))
@@ -658,6 +698,8 @@ class LexicalService:
         list[str]
             Liste de tokens alphanumériques de longueur >= 3.
         """
+        # Version légère de tokenisation,
+        # suffisante pour l'extraction de mots-clés simples.
         text = self.normalize_text(value)
         return re.findall(r"\b[a-z0-9]{3,}\b", text)
 
@@ -675,6 +717,8 @@ class LexicalService:
         str
             Texte final nettoyé.
         """
+        # Assemble plusieurs champs textuels en une seule chaîne propre,
+        # sans laisser traîner de bruit de formatage.
         return self.clean_text(
             " ".join(self.extract_text(value) for value in values if value)
         )
@@ -704,6 +748,9 @@ class LexicalService:
         bool
             True si le terme est présent, sinon False.
         """
+        # Vérifie une présence lexicale avec borne de mot.
+        # C'est plus sûr qu'un simple "in", surtout pour éviter
+        # des matches parasites au milieu d'autres mots.
         normalized_text = self.normalize_text(text)
         normalized_term = self.normalize_text(term)
 
@@ -731,6 +778,7 @@ class LexicalService:
         bool
             True si au moins un terme est trouvé.
         """
+        # Helper pratique pour tester un ensemble de variantes lexicales.
         normalized_text = self.normalize_text(text)
         if not normalized_text or not terms:
             return False
@@ -759,6 +807,9 @@ class LexicalService:
         int
             Nombre de termes distincts trouvés.
         """
+        # Mesure la densité d'un signal lexical.
+        # Utile lorsqu'un seul terme isolé est trop faible
+        # pour conclure à un vrai contexte métier.
         normalized_text = self.normalize_text(text)
         if not normalized_text or not terms:
             return 0
@@ -805,6 +856,8 @@ class LexicalService:
         list[str]
             Liste triée de mots-clés.
         """
+        # Extraction volontairement simple :
+        # pas de NLP lourd, juste une base robuste pour enrichir les textes.
         tokens = self.tokenize_text(text)
 
         keywords = {
@@ -831,6 +884,8 @@ class LexicalService:
         list[str]
             Liste triée de mots-clés du titre.
         """
+        # Spécialisation légère pour le titre,
+        # souvent plus dense et plus discriminant que le reste.
         return self.extract_keywords(title, min_len=3, remove_stopwords=True)
 
     # ------------------------------------------------------------------
@@ -854,6 +909,8 @@ class LexicalService:
         str | None
             Type canonique détecté, ou None.
         """
+        # Détection directe d'un type métier explicite.
+        # Très utile côté requête utilisateur.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return None
@@ -878,6 +935,7 @@ class LexicalService:
         str | None
             Genre canonique détecté, ou None.
         """
+        # Détection directe d'un genre musical explicitement formulé.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return None
@@ -906,6 +964,8 @@ class LexicalService:
         list[str]
             Liste triée de signaux de public détectés.
         """
+        # Détecte des indices simples de public,
+        # sans extrapoler au-delà de ce qui est explicitement dit.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return []
@@ -938,6 +998,8 @@ class LexicalService:
         tuple[str, bool | None]
             Libellé tarifaire et booléen de gratuité.
         """
+        # Agrège plusieurs champs textuels pour construire
+        # un signal tarifaire simple mais utile au pipeline.
         text = self.join_texts(*values)
         text_norm = self.normalize_text(text)
 
@@ -972,6 +1034,8 @@ class LexicalService:
         bool
             True si un signal de marché est détecté.
         """
+        # Sert à repérer des événements de vente ou de brocante,
+        # potentiellement peu pertinents dans certains contextes culturels.
         return self.contains_any_term(text, self._market_terms_norm)
 
     def has_repair_signal(self, text: object) -> bool:
@@ -988,6 +1052,7 @@ class LexicalService:
         bool
             True si un signal de réparation est détecté.
         """
+        # Sert à distinguer des événements de type réparation / repair café.
         return self.contains_any_term(text, self._repair_terms_norm)
 
     def has_religious_signal(self, text: object) -> bool:
@@ -1004,6 +1069,8 @@ class LexicalService:
         bool
             True si un signal religieux est détecté.
         """
+        # Petit détecteur de signaux religieux,
+        # utile pour éviter certains faux positifs.
         return self.contains_any_term(text, self._religious_terms_norm)
 
     def has_business_signal(self, text: object) -> bool:
@@ -1020,6 +1087,8 @@ class LexicalService:
         bool
             True si un signal business est détecté.
         """
+        # Détecte un vocabulaire business / pro / networking
+        # qui peut orienter le document hors du périmètre culturel recherché.
         return self.contains_any_term(text, self._business_terms_norm)
 
     def is_cultural_query(self, text: object) -> bool:
@@ -1051,6 +1120,8 @@ class LexicalService:
         bool
             True si la requête contient une contrainte culturelle explicite.
         """
+        # Fonction clé pour ne pas activer à tort
+        # un filtre culturel fort sur des requêtes trop vagues.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return False
@@ -1100,6 +1171,8 @@ class LexicalService:
         bool
             True si la question est une demande large d'activités / sorties.
         """
+        # Détecte un besoin d'exploration large,
+        # utile pour adapter la logique de filtrage sans surcontraindre.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return False
@@ -1120,6 +1193,8 @@ class LexicalService:
         str | None
             "gratuit", "payant" ou None.
         """
+        # Respecte le principe métier :
+        # on ne filtre fortement que sur ce que l'utilisateur a vraiment demandé.
         text_norm = self.normalize_text(text)
         if not text_norm:
             return None
@@ -1158,6 +1233,8 @@ class LexicalService:
         list[str]
             Liste triée de termes métier dérivés.
         """
+        # Produit des termes supplémentaires utiles à l'embedding,
+        # au matching léger et au ranking.
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         event_type_norm = self.normalize_text(event_type)
@@ -1285,6 +1362,8 @@ class LexicalService:
         list[str]
             Liste triée de termes musicaux.
         """
+        # Enrichissement musical plus fin que le seul genre canonique.
+        # On conserve à la fois la catégorie et certaines variantes réellement vues.
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         event_type_norm = self.normalize_text(event_type)
@@ -1341,6 +1420,8 @@ class LexicalService:
         str
             Type canonique inféré ou chaîne vide.
         """
+        # Essaie d'homogénéiser le type documentaire
+        # tout en restant prudent pour éviter les faux positifs.
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         event_type_norm = self.normalize_text(event_type)
@@ -1462,6 +1543,8 @@ class LexicalService:
         str
             Genre musical canonique ou chaîne vide.
         """
+        # Déduit un genre musical stable,
+        # mais seulement lorsqu'il est vraiment identifiable.
         title_norm = self.normalize_text(title)
         desc_norm = self.normalize_text(description)
         _ = self.normalize_text(event_type)
@@ -1513,6 +1596,8 @@ class LexicalService:
         dict[str, Any]
             Dictionnaire structuré de signaux.
         """
+        # Fonction de synthèse pour l'analyse lexicale des questions.
+        # Elle centralise les signaux utiles au filtrage et au ranking.
         question_norm = self.normalize_text(question)
 
         return {
@@ -1560,6 +1645,9 @@ class LexicalService:
         dict[str, Any]
             Profil lexical structuré du document.
         """
+        # Version document de la logique de synthèse lexicale.
+        # Elle consolide plusieurs signaux réutilisables
+        # sans disperser la logique dans document_service.
         full_description = self.join_texts(description, long_description)
         support_text = self.join_texts(title, full_description, event_type)
 

@@ -59,6 +59,9 @@ class FilterService:
     L'idée n'est pas de classer les documents, mais simplement de
     retirer ceux qui semblent manifestement incompatibles avec la demande.
     """
+    # Cette classe sert de garde-barrière avant la recherche vectorielle.
+    # Elle ne classe pas les documents, elle enlève surtout
+    # ceux qui sont clairement incompatibles avec la demande.
 
     MONTHS = {
         "janvier": 1,
@@ -74,6 +77,7 @@ class FilterService:
         "novembre": 11,
         "decembre": 12,
     }
+    # Table simple de conversion nom de mois -> numéro.
 
     KNOWN_CITIES = {
         "montpellier",
@@ -86,6 +90,7 @@ class FilterService:
         "lille",
         "nantes",
     }
+    # Liste de villes connues détectables lexicalement dans la question.
 
     STRONG_CULTURAL_EVENT_TYPES = {
         "exposition",
@@ -96,23 +101,29 @@ class FilterService:
         "conte",
         "lecture",
     }
+    # Types culturels considérés comme forts.
 
     WEAK_CULTURAL_EVENT_TYPES = {
         "atelier",
         "conference",
         "visite",
     }
+    # Types culturels plus faibles, à traiter avec prudence.
 
     WEEKEND_TIME_MODES = {
         "weekend_explicit",
         "weekend_this",
         "weekend_next",
     }
+    # Modes temporels utilisés pour reconnaître
+    # une logique spéciale de filtrage sur week-end.
 
     def __init__(self) -> None:
         """
         Initialise le service de filtrage avec son service lexical partagé.
         """
+        # Le filtrage s'appuie sur le service lexical
+        # pour garantir une logique homogène avec les autres couches.
         self.lexical_service = LexicalService()
 
     # ------------------------------------------------------------------
@@ -133,6 +144,8 @@ class FilterService:
         str
             Chaîne vide si la valeur est nulle, sinon conversion textuelle.
         """
+        # Petit garde-fou local pour éviter les None
+        # dans les opérations de parsing.
         return "" if value is None else str(value)
 
     def normalize_text(self, text: object) -> str:
@@ -152,6 +165,7 @@ class FilterService:
         str
             Texte normalisé.
         """
+        # Point d'entrée local vers la normalisation commune.
         return self.lexical_service.normalize_text(text)
 
     def parse_iso_date(self, value: object) -> date | None:
@@ -168,6 +182,8 @@ class FilterService:
         date | None
             Date convertie si possible, sinon None.
         """
+        # Sert à convertir les dates documentaires stockées en chaîne
+        # vers un format exploitable pour les comparaisons temporelles.
         raw = self._safe(value).strip()
         if not raw:
             return None
@@ -195,6 +211,8 @@ class FilterService:
         date | None
             Date valide, sinon None.
         """
+        # Empêche qu'une date invalide
+        # casse l'extraction des filtres temporels.
         try:
             return date(year, month, day)
         except ValueError:
@@ -218,6 +236,8 @@ class FilterService:
         dict[str, Any]
             Dictionnaire de métadonnées.
         """
+        # Accès centralisé aux métadonnées pour éviter
+        # de répéter doc.metadata or {} partout.
         return doc.metadata or {}
 
     def _doc_dates(self, doc: Document) -> tuple[date | None, date | None]:
@@ -237,6 +257,8 @@ class FilterService:
         tuple[date | None, date | None]
             Date de début, date de fin.
         """
+        # Helper central pour lire les dates documentaires
+        # de façon cohérente dans toutes les fonctions de matching temporel.
         md = self._metadata(doc)
         first_date = self.parse_iso_date(md.get("first_date"))
         last_date = self.parse_iso_date(md.get("last_date"))
@@ -260,6 +282,8 @@ class FilterService:
         str
             Ville normalisée.
         """
+        # Privilégie la version déjà normalisée si elle existe,
+        # sinon normalise le champ brut.
         md = self._metadata(doc)
         return md.get("city_norm") or self.normalize_text(md.get("city", ""))
 
@@ -279,6 +303,8 @@ class FilterService:
         str
             Type d'événement normalisé.
         """
+        # On lit d'abord le type canonique car il est plus stable
+        # que le type brut pour le filtrage métier.
         md = self._metadata(doc)
         return (
             md.get("canonical_event_type_norm")
@@ -301,6 +327,8 @@ class FilterService:
         str
             Genre musical normalisé.
         """
+        # Même logique que pour le type d'événement,
+        # mais appliquée au genre musical.
         md = self._metadata(doc)
         return md.get("music_genre_norm") or self.normalize_text(md.get("music_genre", ""))
 
@@ -321,6 +349,9 @@ class FilterService:
         str
             Texte consolidé du document.
         """
+        # Fournit un texte unique exploitable pour des vérifications lexicales.
+        # search_text est prioritaire car il a été construit
+        # précisément pour ce type d'usage.
         md = self._metadata(doc)
         search_text = md.get("search_text")
         if search_text:
@@ -352,6 +383,7 @@ class FilterService:
         bool | None
             True si gratuit, False si payant, None si inconnu.
         """
+        # Réutilise directement le signal tarifaire enrichi.
         md = self._metadata(doc)
         return md.get("is_free")
 
@@ -369,6 +401,7 @@ class FilterService:
         bool | None
             Booléen fiable si disponible, sinon None.
         """
+        # Lit le booléen métier s'il a été calculé proprement en amont.
         md = self._metadata(doc)
         value = md.get("is_single_day")
 
@@ -394,6 +427,8 @@ class FilterService:
         int | None
             Durée en jours, ou None si indéterminable.
         """
+        # Essaie d'abord de réutiliser la durée calculée en amont,
+        # puis recalcule à partir des dates si nécessaire.
         md = self._metadata(doc)
         value = md.get("duration_days")
 
@@ -425,6 +460,8 @@ class FilterService:
         set[str]
             Ensemble de termes normalisés.
         """
+        # Lit les termes dérivés calculés par document_service / lexical_service
+        # et les remet sous forme normalisée.
         md = self._metadata(doc)
         terms = md.get("derived_event_terms", [])
         if not isinstance(terms, list):
@@ -450,6 +487,8 @@ class FilterService:
         set[str]
             Ensemble de termes musicaux normalisés.
         """
+        # Même principe que pour les termes métier,
+        # mais appliqué à la musique.
         md = self._metadata(doc)
         terms = md.get("derived_music_terms", [])
         if not isinstance(terms, list):
@@ -475,6 +514,8 @@ class FilterService:
         set[str]
             Ensemble de termes de public normalisés.
         """
+        # Sert au matching audience en réutilisant
+        # les signaux déjà enrichis dans les documents.
         md = self._metadata(doc)
         terms = md.get("audience_terms", [])
         if not isinstance(terms, list):
@@ -500,6 +541,7 @@ class FilterService:
         bool
             True si le document est marqué comme culturel fort.
         """
+        # Réutilise le flag enrichi calculé en amont.
         md = self._metadata(doc)
         return bool(md.get("is_strong_cultural_candidate", False))
 
@@ -517,6 +559,7 @@ class FilterService:
         bool
             True si le document est marqué comme culturel faible.
         """
+        # Même logique, mais pour les cas plus ambigus.
         md = self._metadata(doc)
         return bool(md.get("is_weak_cultural_candidate", False))
 
@@ -534,6 +577,8 @@ class FilterService:
         bool
             True si un signal de marché est présent.
         """
+        # Sert à exclure des documents peu compatibles
+        # avec une recherche culturelle stricte.
         md = self._metadata(doc)
         return bool(md.get("has_market_signal", False))
 
@@ -551,6 +596,7 @@ class FilterService:
         bool
             True si un signal de réparation est présent.
         """
+        # Idem pour les événements de type réparation.
         md = self._metadata(doc)
         return bool(md.get("has_repair_signal", False))
 
@@ -568,6 +614,7 @@ class FilterService:
         bool
             True si un signal business est présent.
         """
+        # Idem pour les signaux business / pro.
         md = self._metadata(doc)
         return bool(md.get("has_business_signal", False))
 
@@ -589,6 +636,8 @@ class FilterService:
         str | None
             Ville détectée si présente.
         """
+        # Cherche une ville explicite dans la question.
+        # Le tri par longueur décroissante évite certains conflits.
         for city in sorted(self.KNOWN_CITIES, key=len, reverse=True):
             if re.search(rf"\b{re.escape(city)}\b", question_norm):
                 return city
@@ -608,6 +657,8 @@ class FilterService:
         str | None
             `"single_day"`, `"multi_day"` ou None.
         """
+        # Ne s'active que si la contrainte de durée
+        # est explicitement formulée.
         if re.search(
             r"\b(sur une journee|en une journee|a la journee|journee unique|ponctuel)\b",
             question_norm,
@@ -642,6 +693,8 @@ class FilterService:
         tuple[date, date]
             Début du mois, début du mois suivant.
         """
+        # Produit un intervalle [début du mois ; début du mois suivant[
+        # pratique pour tester un chevauchement de période.
         month_start = date(year, month, 1)
 
         if month == 12:
@@ -665,6 +718,8 @@ class FilterService:
         tuple[date, date]
             Début de l'année, début de l'année suivante.
         """
+        # Même logique que pour le mois,
+        # mais à l'échelle de l'année.
         return date(year, 1, 1), date(year + 1, 1, 1)
 
     def _get_weekend_range(
@@ -687,6 +742,8 @@ class FilterService:
         tuple[date, date]
             Samedi, dimanche.
         """
+        # Calcule le samedi et le dimanche pertinents
+        # à partir d'une date de référence.
         weekday = reference.weekday()
 
         if weekday == 5:
@@ -725,6 +782,8 @@ class FilterService:
         tuple[date | None, date | None]
             Début et fin du week-end si détectés.
         """
+        # Détecte un week-end écrit explicitement dans la question
+        # et le convertit en bornes calendaires.
         month_names = "|".join(self.MONTHS.keys())
 
         patterns = [
@@ -803,6 +862,9 @@ class FilterService:
         bool
             True si le document est compatible.
         """
+        # Cas particulier des requêtes week-end :
+        # on veut un chevauchement, mais sans accepter
+        # des événements beaucoup trop longs.
         first_date, last_date = self._doc_dates(doc)
 
         if not first_date:
@@ -843,6 +905,8 @@ class FilterService:
         dict[str, Any]
             Dictionnaire de filtres temporels.
         """
+        # Fonction centrale d'analyse temporelle de la question.
+        # Elle fabrique un petit paquet de filtres calendaires structurés.
         filters: dict[str, Any] = {
             "exact_date": None,
             "month": None,
@@ -981,6 +1045,9 @@ class FilterService:
         dict[str, Any]
             Ensemble des filtres détectés.
         """
+        # Point d'entrée principal de lecture des contraintes utilisateur.
+        # Cette fonction fusionne :
+        # ville, temps, lexical, durée, prix, audience.
         question_norm = self.normalize_text(question)
         date_filters = self._extract_date_filters(question_norm)
 
@@ -1033,6 +1100,8 @@ class FilterService:
         bool
             True si le document respecte la ville.
         """
+        # Filtre géographique simple et strict
+        # lorsque la ville est connue.
         city = filters.get("city")
         if not city:
             return True
@@ -1059,6 +1128,8 @@ class FilterService:
         bool
             True si au moins une variante est présente.
         """
+        # Permet de tester rapidement si un document
+        # contient une des formes lexicales compatibles.
         if not variants:
             return False
 
@@ -1074,6 +1145,8 @@ class FilterService:
         str
             `"exact"`, `"variant"` ou `"mismatch"`.
         """
+        # Donne une granularité plus fine qu'un simple booléen :
+        # exact, variante acceptable, ou incompatibilité.
         if not requested_event_type:
             return "variant"
 
@@ -1114,6 +1187,8 @@ class FilterService:
         bool
             True si le document présente un signal musical suffisamment fort.
         """
+        # Garde-fou pour éviter qu'un simple mot musical isolé
+        # fasse passer un document pour un vrai événement musical.
         doc_event_type = self._doc_event_type(doc)
         if doc_event_type in self.lexical_service.MUSICAL_EVENT_TYPES:
             return True
@@ -1167,6 +1242,8 @@ class FilterService:
         bool
             True si le document est jugé culturel.
         """
+        # Décide si le document est vraiment culturel
+        # en réutilisant les signaux enrichis et quelques garde-fous.
         if self._doc_has_business_signal(doc):
             return False
 
@@ -1216,6 +1293,8 @@ class FilterService:
         bool
             True si le document respecte le type demandé.
         """
+        # Active un filtre sur type uniquement
+        # si ce type a été explicitement demandé.
         event_type = filters.get("event_type")
         if not event_type:
             return True
@@ -1238,6 +1317,8 @@ class FilterService:
         bool
             True si le document respecte le genre musical demandé.
         """
+        # Filtre musical prudent :
+        # on veut un vrai document musical, pas juste un mot flottant.
         music_genre = filters.get("music_genre")
         if not music_genre:
             return True
@@ -1282,6 +1363,8 @@ class FilterService:
         bool
             True si le document est compatible avec une contrainte culturelle.
         """
+        # Ne filtre culturellement que si la question
+        # exprimait vraiment une contrainte culturelle.
         if not filters.get("is_cultural_query"):
             return True
 
@@ -1303,6 +1386,8 @@ class FilterService:
         bool
             True si la durée est compatible.
         """
+        # Filtre durée souple :
+        # si l'information manque, on évite de rejeter trop vite.
         duration_filter = filters.get("duration_filter")
         if not duration_filter:
             return True
@@ -1344,6 +1429,9 @@ class FilterService:
         bool
             True si le document est compatible temporellement.
         """
+        # Fonction centrale de matching temporel.
+        # L'idée principale est de tester un chevauchement
+        # entre la période demandée et celle du document.
         exact_date = filters.get("exact_date")
         month = filters.get("month")
         year = filters.get("year")
@@ -1405,6 +1493,8 @@ class FilterService:
         bool
             True si le document est compatible avec le filtre tarifaire.
         """
+        # Filtre prix volontairement tolérant si l'information manque,
+        # afin de ne pas casser le rappel.
         price_filter = filters.get("price_filter")
         if not price_filter:
             return True
@@ -1443,6 +1533,8 @@ class FilterService:
         bool
             True si le public cible est compatible.
         """
+        # Filtre audience simple par intersection de termes.
+        # Si le document n'a pas d'info audience, on reste souple.
         requested_terms = filters.get("audience_terms") or []
         if not requested_terms:
             return True
@@ -1483,6 +1575,8 @@ class FilterService:
         bool
             True si au moins une contrainte forte est présente.
         """
+        # Sert à décider si le préfiltrage structuré
+        # doit réellement se déclencher de façon forte.
         return any(
             [
                 filters.get("explicit_city"),
@@ -1514,6 +1608,8 @@ class FilterService:
         dict[str, list[Document]]
             Pipeline vide.
         """
+        # Produit une structure uniforme de sortie
+        # même lorsqu'une étape vide complètement le pipeline.
         return {
             "input": docs_input,
             "after_city": [],
@@ -1557,6 +1653,9 @@ class FilterService:
         dict[str, list[Document]]
             Documents intermédiaires à chaque étape.
         """
+        # Fonction d'orchestration principale du préfiltrage.
+        # Elle exécute les filtres dans un ordre métier lisible
+        # et garde les états intermédiaires pour le debug.
         docs_input = docs[:]
         docs_after_city = docs_input[:]
 
@@ -1741,6 +1840,9 @@ class FilterService:
         list[Document]
             Documents retenus après filtrage.
         """
+        # API principale du service :
+        # extrait les filtres, exécute le pipeline,
+        # renvoie uniquement les documents finaux retenus.
         if not docs:
             return []
 
@@ -1770,6 +1872,8 @@ class FilterService:
         dict[str, Any]
             Représentation légère du document.
         """
+        # Produit une vue compacte d'un document
+        # pour comprendre pourquoi il a survécu au filtrage.
         md = self._metadata(doc)
         return {
             "title": md.get("title", ""),
@@ -1818,6 +1922,9 @@ class FilterService:
         dict[str, Any]
             Structure détaillée de debug.
         """
+        # Variante de debug du service :
+        # expose les filtres détectés, les volumes après chaque étape,
+        # et une vue légère des documents finaux.
         filters = self.extract_filters(
             question=question,
             default_city=default_city,
